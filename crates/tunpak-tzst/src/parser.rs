@@ -1,8 +1,6 @@
 //! `.tzst` parser: tokens -> AST (spec/04). Statements end with `;` (strict).
 //!
-//! Imports (`import ...;`, `prefix.fn(...)`) are milestone v2: they are rejected here with
-//! "imports are not supported yet". To add them: a `Program.imports` list plus an `EK::LibCall`
-//! variant produced where `Ident '.'` is currently rejected in [`P::primary`].
+//! Imports (`import "std/json" as json;`) land in `Program.imports`; `json.parse(x)` is `EK::LibCall`.
 use crate::lexer::{lex, Tok, Token};
 use crate::CompileError;
 use tunpak_format::opcodes::builtin_id;
@@ -33,6 +31,8 @@ pub enum EK {
     Slice(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `int(x)`, `len(x)`, ..., or a user function
     Call(String, Vec<Expr>),
+    /// `alias.fn(args)` (validated against the import's export table by the checker)
+    LibCall(String, String, Vec<Expr>),
     /// prefix-form operation (`read_u32 @b @p + 4`, `split @s ","`, ...)
     Prefix(Pre, Vec<Expr>),
 }
@@ -164,8 +164,8 @@ pub enum SK {
     Let(String, Expr),
     LetTuple(Vec<String>, Expr),
     Assign(String, Expr),
-    /// `@a[i] = v;` / `@o["k"] = v;`
-    IndexAssign(String, Expr, Expr),
+    /// `@a[i] = v;` / `@o["k"][0] = v;` (one or more indices)
+    IndexAssign(String, Vec<Expr>, Expr),
     /// `push @a <- v;`
     Push(String, Expr),
     /// operands as written; arity/constness is checked by the checker
@@ -200,8 +200,30 @@ pub struct FnDecl {
     pub pos: Pos,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Import {
+    pub alias: String,
+    /// normalized: `std/..`, `lib/..` or `scripts/..`
+    pub path: String,
+    pub pos: Pos,
+}
+
+/// Normalize an import path as written (`"utils"` -> `scripts/utils`). `run/` is rejected (invariant 8).
+pub fn normalize_import(raw: &str) -> Result<String, String> {
+    if raw.starts_with("run/") {
+        return Err("run/ entries are executables: use RUN / LOAD_SRV in main.tun, not import".into());
+    }
+    let full = if ["std/", "lib/", "scripts/"].iter().any(|p| raw.starts_with(p)) { raw.to_string() } else { format!("scripts/{raw}") };
+    let rest = full.split_once('/').map_or("", |x| x.1);
+    if rest.is_empty() || rest.split('/').any(|s| s.is_empty() || s == "..") || full.contains('\\') {
+        return Err(format!("bad import path '{raw}'"));
+    }
+    Ok(full)
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Program {
+    pub imports: Vec<Import>,
     pub needs: Vec<Need>,
     pub fns: Vec<FnDecl>,
     /// position of the `start` keyword + its body
@@ -314,7 +336,13 @@ impl P<'_> {
             };
             match kw.as_str() {
                 "NEED" => p.needs.push(self.need(&t)?),
-                "import" => return Err(err(&t, "imports are not supported yet")),
+                "import" => {
+                    if !p.fns.is_empty() || p.start.is_some() {
+                        return Err(err(&t, "imports must come before 'fn' and 'start'"));
+                    }
+                    let imp = self.import_decl(&t, &p.imports)?;
+                    p.imports.push(imp);
+                }
                 "fn" => p.fns.push(self.fn_decl(&t)?),
                 "start" => {
                     if p.start.is_some() {
@@ -327,6 +355,25 @@ impl P<'_> {
             }
         }
         Ok(p)
+    }
+
+    fn import_decl(&mut self, t: &Token, prev: &[Import]) -> Res<Import> {
+        let raw = self.string()?;
+        self.expect_ident("as")?;
+        let a = self.next()?;
+        let Tok::Ident(alias) = a.tok.clone() else { return Err(err(&a, "expected an import alias (identifier)")) };
+        self.semi()?;
+        let path = normalize_import(&raw).map_err(|m| err(t, m))?;
+        if prev.iter().any(|i| i.alias == alias) {
+            return Err(err(&a, format!("duplicate import alias '{alias}'")));
+        }
+        if prev.iter().any(|i| i.path == path) {
+            return Err(err(t, format!("duplicate import of '{path}'")));
+        }
+        if prev.len() >= 255 {
+            return Err(err(t, "more than 255 imports"));
+        }
+        Ok(Import { alias, path, pos: (t.line, t.col) })
     }
 
     fn need(&mut self, t: &Token) -> Res<Need> {
@@ -409,11 +456,14 @@ impl P<'_> {
                 Err(err(&t, if after_brace { "unexpected ';' after '}'" } else { "unexpected ';'" }))
             }
             Tok::UserVar(n) => {
-                let k = if self.eat("[") {
-                    let i = self.expr()?;
-                    self.expect("]")?;
+                let k = if self.is_punct("[") {
+                    let mut idx = vec![];
+                    while self.eat("[") {
+                        idx.push(self.expr()?);
+                        self.expect("]")?;
+                    }
                     self.expect("=")?;
-                    SK::IndexAssign(n.clone(), i, self.expr()?)
+                    SK::IndexAssign(n.clone(), idx, self.expr()?)
                 } else {
                     self.expect("=")?;
                     SK::Assign(n.clone(), self.expr()?)
@@ -494,7 +544,7 @@ impl P<'_> {
                         self.expect_ident("exit")?;
                         return mk(SK::OnExit(self.block()?));
                     }
-                    "import" => return Err(err(&t, "imports are not supported yet")),
+                    "import" => return Err(err(&t, "imports are only allowed at top level, before 'fn' and 'start'")),
                     "elif" | "else" => return Err(err(&t, format!("'{kw}' without a matching 'if'"))),
                     "fn" | "start" | "NEED" => return Err(err(&t, format!("'{kw}' is only allowed at top level"))),
                     _ if Pre::lookup(kw).is_some() || matches!(self.peek_at(0), Some(Tok::Punct("(" | "."))) => {
@@ -530,6 +580,9 @@ impl P<'_> {
                 arms.push((c, self.block()?));
             } else if self.is_ident("else") {
                 self.pos += 1;
+                if self.is_ident("if") {
+                    return Err(CompileError::new(self.here().0, self.here().1, "'else if' is not supported: use 'elif'"));
+                }
                 els = Some(self.block()?);
                 break;
             } else {
@@ -737,8 +790,22 @@ impl P<'_> {
                 }
             }
             Tok::Ident(name) => {
-                if matches!(self.peek_at(0), Some(Tok::Punct("."))) {
-                    return Err(err(&t, "imports are not supported yet"));
+                if self.eat(".") {
+                    let f = self.next()?;
+                    let Tok::Ident(fname) = f.tok.clone() else { return Err(err(&f, format!("expected a function name after '{name}.'"))) };
+                    self.expect("(")?;
+                    let mut args = vec![];
+                    while !self.is_punct(")") {
+                        args.push(self.expr()?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    if args.len() > 255 {
+                        return Err(err(&t, format!("call of '{name}.{fname}' has more than 255 arguments")));
+                    }
+                    return Ok(Expr { k: EK::LibCall(name.clone(), fname, args), pos });
                 }
                 if let Some((pre, n)) = Pre::lookup(name) {
                     let mut args = vec![];
@@ -787,6 +854,10 @@ impl P<'_> {
                     '0' => '\0',
                     o => o,
                 });
+                i += 2;
+            } else if (c == '{' || c == '}') && cs.get(i + 1) == Some(&c) {
+                // SPEC-GAP: spec/04 does not say how to write a literal brace in an f-string; `{{` / `}}` is the rule here.
+                lit.push(c);
                 i += 2;
             } else if c == '{' {
                 let (mut depth, mut j, mut inq) = (1, i + 1, false);

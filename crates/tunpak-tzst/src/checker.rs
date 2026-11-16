@@ -4,6 +4,8 @@
 use crate::parser::*;
 use crate::CompileError;
 use std::collections::{HashMap, HashSet};
+use tunpak_format::libfn::LibTable;
+use tunpak_format::types::ValueType;
 
 type Res<T> = Result<T, CompileError>;
 
@@ -38,13 +40,27 @@ impl Ty {
     }
 }
 
-/// fn name -> (argc, number of declared return values)
-pub type Sigs = HashMap<String, (usize, usize)>;
+/// `fns`: fn name -> (argc, number of declared return values); `libs`: import alias -> (import_idx, export table).
+#[derive(Default)]
+pub struct Sigs {
+    pub fns: HashMap<String, (usize, usize)>,
+    pub libs: HashMap<String, (u8, LibTable)>,
+}
+impl std::ops::Deref for Sigs {
+    type Target = HashMap<String, (usize, usize)>;
+    fn deref(&self) -> &Self::Target {
+        &self.fns
+    }
+}
 
-pub fn sigs(p: &Program) -> Res<Sigs> {
-    let mut s = Sigs::new();
+/// `tables[i]` is the export table of `p.imports[i]`.
+pub fn sigs(p: &Program, tables: &[LibTable]) -> Res<Sigs> {
+    let mut s = Sigs::default();
+    for (i, (imp, t)) in p.imports.iter().zip(tables).enumerate() {
+        s.libs.insert(imp.alias.clone(), (i as u8, t.clone()));
+    }
     for f in &p.fns {
-        if s.insert(f.name.clone(), (f.params.len(), f.rets.len())).is_some() {
+        if s.fns.insert(f.name.clone(), (f.params.len(), f.rets.len())).is_some() {
             return Err(CompileError::new(f.pos.0, f.pos.1, format!("duplicate function '{}'", f.name)));
         }
         if f.params.len() > 255 {
@@ -91,6 +107,14 @@ pub fn ty_of(e: &Expr, vars: &HashMap<String, Ty>, sigs: &Sigs) -> Ty {
                 Some(&(_, r)) if r >= 2 => Ty::Tuple(r),
                 _ => Ty::Unknown,
             },
+        },
+        EK::LibCall(a, f, _) => match sigs.libs.get(a).and_then(|(_, t)| t.find(f)).map(|lf| lf.ret_type) {
+            Some(ValueType::Int) => Ty::Int,
+            Some(ValueType::Str) => Ty::Str,
+            Some(ValueType::Buf) => Ty::Buf,
+            Some(ValueType::Arr) => Ty::Arr,
+            Some(ValueType::Object) => Ty::Object,
+            _ => Ty::Unknown,
         },
         EK::Prefix(p, args) => match p {
             Pre::ReadU8 | Pre::ReadU16 | Pre::ReadU32 | Pre::ReadU64 | Pre::Indexof | Pre::Contains | Pre::Find => Ty::Int,
@@ -168,12 +192,14 @@ struct Ck {
     loops: usize,
     /// declared return count of the function being checked (None in `start`)
     func: Option<usize>,
+    /// import alias -> path (for messages)
+    paths: HashMap<String, String>,
 }
 
 /// Run all static checks; returns the warnings.
-pub fn check(p: &Program) -> Res<Vec<String>> {
+pub fn check(p: &Program, tables: &[LibTable]) -> Res<Vec<String>> {
     let mut c = Ck {
-        sigs: sigs(p)?,
+        sigs: sigs(p, tables)?,
         warnings: vec![],
         endian_set: false,
         warned: false,
@@ -181,6 +207,7 @@ pub fn check(p: &Program) -> Res<Vec<String>> {
         types: HashMap::new(),
         loops: 0,
         func: None,
+        paths: p.imports.iter().map(|i| (i.alias.clone(), i.path.clone())).collect(),
     };
     // textual order matters for the endian warning
     let mut items: Vec<(Pos, Option<&FnDecl>)> = p.fns.iter().map(|f| (f.pos, Some(f))).collect();
@@ -266,10 +293,12 @@ impl Ck {
             }
             SK::IndexAssign(n, i, v) => {
                 self.var_defined(n, pos)?;
-                if let Ty::Tuple(_) = self.types.get(n).copied().unwrap_or(Ty::Unknown) {
+                if let (Ty::Tuple(_), 1) = (self.types.get(n).copied().unwrap_or(Ty::Unknown), i.len()) {
                     return Err(e(pos, format!("cannot assign into tuple @{n} (tuples are fixed)")));
                 }
-                self.expr(i)?;
+                for x in i {
+                    self.expr(x)?;
+                }
                 self.expr(v)?;
             }
             SK::Push(n, v) => {
@@ -383,6 +412,10 @@ impl Ck {
         Ok(())
     }
 
+    fn lib_path(&self, alias: &str) -> String {
+        self.paths.get(alias).cloned().unwrap_or_else(|| alias.to_string())
+    }
+
     fn var_arg(&mut self, x: &Expr) -> Res<()> {
         match &x.k {
             EK::Var(n) => self.var_defined(n, x.pos),
@@ -461,6 +494,22 @@ impl Ck {
                     return Err(e(pos, format!("'{name}' expects {want} argument(s), got {}", args.len())));
                 }
             }
+            EK::LibCall(alias, name, args) => {
+                for a in args {
+                    self.expr(a)?;
+                }
+                let Some((_, t)) = self.sigs.libs.get(alias) else {
+                    return Err(e(pos, format!("lib '{alias}' used without import")));
+                };
+                let Some(lf) = t.find(name) else {
+                    let path = self.lib_path(alias);
+                    let names: Vec<&str> = t.functions.iter().map(|f| f.name.as_str()).collect();
+                    return Err(e(pos, format!("unknown function '{name}' in lib '{path}' (available: {})", names.join(", "))));
+                };
+                if args.len() != lf.arg_count as usize {
+                    return Err(e(pos, format!("'{alias}.{name}' expects {} argument(s), got {}", lf.arg_count, args.len())));
+                }
+            }
             EK::Prefix(p, args) => {
                 for a in args {
                     self.expr(a)?;
@@ -488,8 +537,8 @@ impl Ck {
             Bin::Or | Bin::And => {}
             Bin::Eq | Bin::Ne | Bin::Lt | Bin::Gt | Bin::Le | Bin::Ge => {
                 let is_typeof = |x: &Expr| matches!(&x.k, EK::Call(n, _) if n == "typeof");
-                if (is_typeof(a) && const_int(b).is_some()) || (is_typeof(b) && const_int(a).is_some()) {
-                    return Err(e(pos, "typeof() yields a string; comparing it to an integer is an error"));
+                if (is_typeof(a) && tb == Ty::Int) || (is_typeof(b) && ta == Ty::Int) {
+                    return Err(e(pos, "typeof returns a str; comparing it to an int is always false"));
                 }
                 if !matches!(op, Bin::Eq | Bin::Ne) && both && !ta.same_kind(tb) {
                     return Err(e(pos, format!("cannot order {} against {} (no ordering across types)", ta.name(), tb.name())));

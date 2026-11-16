@@ -24,6 +24,8 @@ pub struct Program {
     pub for_end: HashMap<usize, usize>,
     pub consts: Vec<Value>,
     pub fns: Vec<FnMeta>,
+    /// `import_idx` -> path ("std/json", "lib/x", "scripts/y"); empty for main.tun
+    pub imports: Vec<String>,
     pub code_len: usize,
 }
 
@@ -55,7 +57,14 @@ impl Program {
                 FnMeta { name: f.name.clone(), addr, end, argc: f.argc }
             })
             .collect();
-        Ok(Program { insns, off2idx, regions, for_end, consts, fns, code_len: code.len() })
+        Ok(Program { insns, off2idx, regions, for_end, consts, fns, imports: Vec::new(), code_len: code.len() })
+    }
+
+    /// Program of a compiled .tzst, with its import table.
+    pub fn from_tzst(f: &tunpak_format::tzst::TzstFile) -> Result<Program, ExecError> {
+        let mut p = Self::build(&f.tun.consts, &f.tun.code, f.tun.header.width, &f.fns)?;
+        p.imports = f.imports.clone();
+        Ok(p)
     }
 
     /// Instruction index for a code offset; None when it is not an instruction boundary.

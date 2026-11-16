@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 tunpak-format = { path = "../tunpak-format" }
+tunpak-crypto = { path = "../tunpak-crypto" }
+obfstr = "0.4"
+
+[dev-dependencies]

@@ -3,3 +3,4 @@ target/
 !tests/**/*.pak
 *.key
 identity.tzid
+.serena/

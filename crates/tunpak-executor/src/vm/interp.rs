@@ -18,16 +18,15 @@ use super::program::*;
 use super::stack::Handler;
 use super::vars::*;
 use super::{Fault, R};
-use crate::loader::{run_exec, Pak};
+use crate::loader::{run_exec, srv_load, ScriptUnit, Services};
 use crate::platform::linux as plat;
-use crate::sandbox::Sandbox;
-use crate::{ExecError, Io, RunOptions, EXIT_ERROR, EXIT_MISUSE, EXIT_NOT_FOUND};
+use crate::{ExecError, Io, RunOptions, EXIT_ERROR, EXIT_MISUSE, EXIT_NOT_FOUND, EXIT_PERM_DENIED};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tunpak_format::opcodes::{builtin_name, Opcode};
 use tunpak_format::operands::{innermost, Insn, Src};
-use tunpak_format::tzst::TzstFile;
+use tunpak_format::dict::Perm;
 use tunpak_format::types::{EntryType, PermKind};
 
 const MAX_CALL_DEPTH: usize = 256;
@@ -53,6 +52,8 @@ pub struct Env {
     /// `$?`
     pub last_exit: i32,
     pub perms: Perms,
+    /// Force `$TERM_COLOR` (None = detect).
+    pub term_color: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,10 +73,7 @@ impl Limits {
     }
 }
 
-pub struct Launcher<'a> {
-    pub pak: &'a Pak<'a>,
-    pub sb: &'a Sandbox,
-    pub opts: &'a RunOptions,
+pub struct Launcher {
     pub loaded: Vec<u64>,
     pub perm_ids: Vec<u8>,
 }
@@ -90,7 +88,14 @@ pub struct Vm<'a, 'io> {
     io: &'a mut Io<'io>,
     pub env: Env,
     limits: Limits,
-    launcher: Option<Launcher<'a>>,
+    launcher: Option<Launcher>,
+    /// pak, sandbox and caches; `None` for a bare `run_tzst`
+    svc: Option<&'a Services<'a>>,
+    /// frames of the VMs that called into this one (shared recursion budget)
+    base_depth: usize,
+    /// running one imported function: RET of the outermost frame ends the VM with `ret_val`
+    nested: bool,
+    ret_val: Option<Value>,
     cur: Frame,
     callers: Vec<Frame>,
     pc: usize,
@@ -117,7 +122,7 @@ fn launcher_allows(op: Opcode) -> bool {
 }
 
 impl<'a, 'io> Vm<'a, 'io> {
-    fn base(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits, launcher: Option<Launcher<'a>>) -> Self {
+    fn base(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits, launcher: Option<Launcher>) -> Self {
         let mem_limit = limits.mem.max(env.perms.mem.unwrap_or(0));
         Vm {
             prog,
@@ -125,6 +130,10 @@ impl<'a, 'io> Vm<'a, 'io> {
             env,
             limits,
             launcher,
+            svc: None,
+            base_depth: 0,
+            nested: false,
+            ret_val: None,
             cur: Frame::new(None, 0, prog.code_len),
             callers: Vec::new(),
             pc: 0,
@@ -140,17 +149,27 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
     }
 
-    pub fn launcher(prog: &'a Program, pak: &'a Pak<'a>, sb: &'a Sandbox, opts: &'a RunOptions, io: &'a mut Io<'io>) -> Self {
+    pub fn launcher(prog: &'a Program, svc: &'a Services<'a>, io: &'a mut Io<'io>) -> Self {
+        let opts = svc.opts;
         let env = Env {
             dev: opts.dev,
             args: opts.args.clone(),
-            tmp: sb.dir().to_path_buf(),
-            ver: pak.dict.header.pak_version as i64,
+            tmp: svc.sb.dir().to_path_buf(),
+            ver: svc.pak.dict.header.pak_version as i64,
             last_exit: 0,
             perms: Perms::default(),
+            term_color: opts.term_color,
         };
-        let l = Launcher { pak, sb, opts, loaded: vec![], perm_ids: vec![] };
-        Self::base(prog, io, env, Limits::from_opts(opts), Some(l))
+        let l = Launcher { loaded: vec![], perm_ids: vec![] };
+        let mut vm = Self::base(prog, io, env, Limits::from_opts(opts), Some(l));
+        vm.svc = Some(svc);
+        vm
+    }
+
+    /// Give a script access to the pak (scripts/ and lib/ imports, the signed permission table).
+    pub fn with_services(mut self, svc: &'a Services<'a>) -> Self {
+        self.svc = Some(svc);
+        self
     }
 
     pub fn script(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits) -> Self {
@@ -233,8 +252,21 @@ impl<'a, 'io> Vm<'a, 'io> {
         let name = |f: &Frame| {
             f.fn_idx.and_then(|i| self.prog.fns.get(i)).map(|f| f.name.clone()).unwrap_or_else(|| "<start>".into())
         };
-        let stack: Vec<String> = std::iter::once(&self.cur).chain(self.callers.iter().rev()).map(name).collect();
-        format!("{msg}\n  at offset {} in fn '{}'\n  call stack: {}", self.cur_off, name(&self.cur), stack.join(" <- "))
+        let names: Vec<String> = std::iter::once(&self.cur).chain(self.callers.iter().rev()).map(name).collect();
+        // Collapse runs of identical frames ("f x256") and cap the listing at 16 entries.
+        let mut groups: Vec<(String, usize)> = Vec::new();
+        for n in names {
+            match groups.last_mut() {
+                Some((g, c)) if *g == n => *c += 1,
+                _ => groups.push((n, 1)),
+            }
+        }
+        let mut parts: Vec<String> =
+            groups.iter().take(16).map(|(n, c)| if *c > 1 { format!("{n} \u{d7}{c}") } else { n.clone() }).collect();
+        if groups.len() > 16 {
+            parts.push(format!("... ({} more)", groups.len() - 16));
+        }
+        format!("{msg}\n  at offset {} in fn '{}'\n  call stack: {}", self.cur_off, name(&self.cur), parts.join(" <- "))
     }
 
     /// Unwind to the innermost TRY handler. False if there is none.
@@ -349,7 +381,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             "$TMP" => Value::str(self.env.tmp.to_string_lossy().into_owned()),
             "$ARGS" => Value::str(self.env.args.join(" ")),
             "$VER" => Value::Int(self.env.ver),
-            "$TERM_COLOR" => Value::Int(plat::term_color()),
+            "$TERM_COLOR" => Value::Int(self.term_color()),
             "$?" => Value::Int(self.env.last_exit as i64),
             // SPEC-GAP: v0 has no device identity or permission prompts; DEVICE/DEVICE_ID are
             // empty, PERM_CAMERA/MIC are -1 (no permission concept), PERM_PATH_OK is 1.
@@ -358,6 +390,10 @@ impl<'a, 'io> Vm<'a, 'io> {
             "$PERM_PATH_OK" => Value::Int(1),
             _ => return Err(format!("builtin {name} not implemented").into()),
         })
+    }
+
+    fn term_color(&self) -> i64 {
+        self.env.term_color.map_or_else(plat::term_color, |b| b as i64)
     }
 
     fn read_line(&mut self) -> R<String> {
@@ -418,11 +454,10 @@ impl<'a, 'io> Vm<'a, 'io> {
         let off = prog.insns.get(self.pc).map_or(prog.code_len, |i| i.at);
         if off >= self.cur.end_off {
             // fell off the end of the extent
-            return if self.callers.is_empty() {
+            return if self.callers.is_empty() && !self.nested {
                 Ok(Some(0))
             } else {
-                self.do_return(Value::Null)?;
-                Ok(None)
+                Ok(self.do_return(Value::Null)?.then_some(0))
             };
         }
         let Some(insn) = prog.insns.get(self.pc) else { return Ok(Some(0)) };
@@ -435,13 +470,21 @@ impl<'a, 'io> Vm<'a, 'io> {
         self.exec(insn)
     }
 
-    fn do_return(&mut self, v: Value) -> R<()> {
-        let Some(caller) = self.callers.pop() else { return Err("RET outside a function".into()) };
+    /// True when the outermost frame of a nested (imported-function) VM returned: the VM is done.
+    fn do_return(&mut self, v: Value) -> R<bool> {
+        let Some(caller) = self.callers.pop() else {
+            if self.nested {
+                self.ret_val = Some(v);
+                return Ok(true);
+            }
+            return Err("RET outside a function".into());
+        };
         let done = std::mem::replace(&mut self.cur, caller);
         self.pc = done.ret_pc;
         let depth = self.callers.len();
         self.handlers.retain(|h| h.depth <= depth);
-        self.push(v)
+        self.push(v)?;
+        Ok(false)
     }
 
     fn exec(&mut self, insn: &'a Insn) -> R<Option<i32>> {
@@ -486,17 +529,19 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::Arg => self.op_arg(insn)?,
             O::Load | O::Verify => {
                 let r = a_cref(insn, 0);
-                self.require_entry(r)?;
+                self.op_load(r, op == O::Load)?;
                 if op == O::Load {
                     if let Some(l) = self.launcher.as_mut() {
                         l.loaded.push(r);
                     }
                 }
             }
-            O::LoadSrv => return Err(Fault::Rt("LOAD_SRV not supported in this build".into())), // TODO(v2)
+            O::LoadSrv => self.op_load_srv(insn)?,
             O::Perm => {
+                let id = a_u8(insn, 0);
+                self.op_perm(id)?;
                 if let Some(l) = self.launcher.as_mut() {
-                    l.perm_ids.push(a_u8(insn, 0));
+                    l.perm_ids.push(id);
                 }
             }
             O::Run => return self.op_run(a_cref(insn, 0)),
@@ -867,9 +912,11 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::CallFn => self.op_call(a_u16(insn, 0) as usize, a_u8(insn, 1))?,
             O::Ret => {
                 let v = self.src(a_src(insn, 0))?;
-                self.do_return(v)?;
+                if self.do_return(v)? {
+                    return Ok(Some(0));
+                }
             }
-            O::CallLib => return Err("CALL_LIB is not available in this build".into()), // TODO(v2)
+            O::CallLib => self.op_call_lib(insn)?,
 
             // ---- cleanup / errors ----
             O::OnExit => {
@@ -958,7 +1005,7 @@ impl<'a, 'io> Vm<'a, 'io> {
         if argc != f.argc {
             return Err(format!("fn '{}' takes {} args, called with {argc}", f.name, f.argc).into());
         }
-        if self.callers.len() >= MAX_CALL_DEPTH {
+        if self.base_depth + self.callers.len() >= MAX_CALL_DEPTH {
             return Err(format!("max recursion depth {MAX_CALL_DEPTH}").into());
         }
         let addr_idx = prog.idx_of(f.addr).ok_or_else(|| format!("fn '{}' address is not an instruction boundary", f.name))?;
@@ -1040,6 +1087,16 @@ impl<'a, 'io> Vm<'a, 'io> {
     fn op_need(&mut self, kind: u8, cref: u64) -> R<()> {
         let kind = PermKind::try_from(kind).map_err(|e| e.to_string())?;
         let text = stringify(&self.konst(cref)?);
+        // Invariant 5: inside a pak, only what the signed permission table declares is allowed.
+        if let Some(svc) = self.svc {
+            let declared = svc.pak.dict.perms.perms.iter().any(|p| matches!(p, Perm::Path { kind: k, path } if *k == kind && *path == text));
+            if !declared {
+                return Err(fatal(
+                    EXIT_PERM_DENIED,
+                    format!("NEED {} \"{text}\" is not declared in the signed permission table", kind_name(kind)),
+                ));
+            }
+        }
         match kind {
             PermKind::Mem => {
                 let n = ops::parse_size(&text).ok_or_else(|| format!("bad NEED mem size '{text}'"))?;
@@ -1104,9 +1161,109 @@ impl<'a, 'io> Vm<'a, 'io> {
 
     // ---------------- launcher ops ----------------
 
-    fn require_entry(&self, r: u64) -> R<()> {
-        let l = self.launcher.as_ref().ok_or("not a launcher")?;
-        l.pak.entry(r).map(|_| ()).ok_or_else(|| fatal(EXIT_NOT_FOUND, format!("entry not found (ref {r})")))
+    fn services(&self) -> R<&'a Services<'a>> {
+        self.svc.ok_or_else(|| Fault::Rt("this needs a pak (not available in a bare script run)".into()))
+    }
+
+    /// LOAD (`load` = true) / VERIFY. A lib is loaded now (fail early); anything else gets its hash checked.
+    fn op_load(&mut self, r: u64, load: bool) -> R<()> {
+        let svc = self.services()?;
+        let e = svc.pak.entry(r).ok_or_else(|| fatal(EXIT_NOT_FOUND, format!("entry not found (ref {r})")))?;
+        if load && e.entry_type == EntryType::Lib {
+            svc.lib_entry(e).map_err(|m| fatal(EXIT_ERROR, m))?;
+        } else {
+            svc.pak.check_hash(e)?;
+        }
+        Ok(())
+    }
+
+    /// PERM <id>: 1=camera 2=mic 3=net must have its row in the signed table.
+    fn op_perm(&mut self, id: u8) -> R<()> {
+        let kind = match id {
+            1 => PermKind::Camera,
+            2 => PermKind::Mic,
+            3 => PermKind::Net,
+            _ => return Ok(()), // SPEC-GAP: spec/02 lists "1=camera 2=mic 3=net ..."; other ids are accepted and unchecked
+        };
+        let svc = self.services()?;
+        if svc.pak.dict.perms.perms.iter().any(|p| matches!(p, Perm::Path { kind: k, .. } if *k == kind)) {
+            Ok(())
+        } else {
+            Err(fatal(EXIT_PERM_DENIED, format!("PERM {} is not declared in the signed permission table", kind_name(kind))))
+        }
+    }
+
+    fn op_load_srv(&mut self, insn: &Insn) -> R<()> {
+        let svc = self.services()?;
+        let vars = &self.cur.vars;
+        let addr = srv_load::load(svc, a_cref(insn, 0), &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io)?;
+        self.set_new(a_var(insn, 1), Value::str(addr))
+    }
+
+    /// CALL_LIB @dst import_idx fn_id argc: args were pushed left to right.
+    fn op_call_lib(&mut self, insn: &Insn) -> R<()> {
+        let (dst, idx, fn_id, argc) = (a_var(insn, 0), a_u8(insn, 1) as usize, a_u16(insn, 2), a_u8(insn, 3) as usize);
+        let path = self.prog.imports.get(idx).ok_or_else(|| format!("CALL_LIB: import #{idx} out of range"))?;
+        let mut args = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let v = if path.starts_with("std/") {
+            crate::stdlib::call(path, fn_id, &args, self.term_color() != 0)?
+        } else if path.starts_with("scripts/") {
+            let unit = self.services()?.script(path)?;
+            self.call_script(&unit, fn_id, args)?
+        } else if path.starts_with("lib/") {
+            self.services()?.lib(path)?.call(fn_id, &args)?
+        } else {
+            // invariant 8: run/ (and anything else) is never CALL_LIB
+            return Err(format!("CALL_LIB: '{path}' cannot be called as a lib (use RUN / LOAD_SRV for run/ entries)").into());
+        };
+        self.set_new(dst, v)
+    }
+
+    /// Call function `fn_id` of an imported script in a fresh VM that shares this one's
+    /// permission state, limits, recursion budget, deadline and Io. Its `start` block does not run.
+    fn call_script(&mut self, unit: &ScriptUnit, fn_id: u16, args: Vec<Value>) -> R<Value> {
+        let prog = &unit.prog;
+        let f = prog.fns.get(fn_id as usize).ok_or_else(|| format!("script has no function with id {fn_id}"))?;
+        if args.len() != f.argc as usize {
+            return Err(format!("fn '{}' takes {} args, called with {}", f.name, f.argc, args.len()).into());
+        }
+        let depth = self.base_depth + self.callers.len() + 1;
+        if depth >= MAX_CALL_DEPTH {
+            return Err(format!("max recursion depth {MAX_CALL_DEPTH}").into());
+        }
+        let addr_idx = prog.idx_of(f.addr).ok_or_else(|| format!("fn '{}' address is not an instruction boundary", f.name))?;
+        let mut frame = Frame::new(Some(fn_id as usize), 0, f.end);
+        for (i, a) in args.into_iter().enumerate() {
+            frame.vars.set(i as u8, a);
+        }
+        let env = std::mem::take(&mut self.env);
+        let (limits, deadline, svc) = (self.limits, self.deadline, self.svc);
+        let mut vm = Vm::base(prog, &mut *self.io, env, limits, None);
+        vm.svc = svc;
+        vm.base_depth = depth;
+        vm.nested = true;
+        vm.deadline = deadline;
+        vm.big_endian = false;
+        vm.cur = frame;
+        vm.pc = addr_idx;
+        let res = loop {
+            match vm.run_steps() {
+                Err(Fault::Rt(_)) if vm.unwind() => continue, // caught by a TRY inside the script
+                other => break other,
+            }
+        };
+        let (env, ret) = (std::mem::take(&mut vm.env), vm.ret_val.take());
+        drop(vm);
+        self.env = env;
+        match (res?, ret) {
+            (_, Some(v)) => Ok(v),
+            // SPEC-GAP: exit/halt inside an imported function ends the whole program.
+            (code, None) => Err(fatal(code, format!("script exited with code {code} inside an imported function"))),
+        }
     }
 
     fn arg_value(&self, name: &str, flag: bool) -> R<Option<String>> {
@@ -1162,30 +1319,38 @@ impl<'a, 'io> Vm<'a, 'io> {
     }
 
     fn op_run(&mut self, r: u64) -> R<Option<i32>> {
-        let Some(l) = self.launcher.as_ref() else { return Err("RUN not valid in .tzst".into()) };
-        let (pak, sb, opts) = (l.pak, l.sb, l.opts);
-        let e = pak.entry(r).ok_or_else(|| fatal(EXIT_NOT_FOUND, "entry not found"))?;
+        let svc = self.services()?;
+        let e = svc.pak.entry(r).ok_or_else(|| fatal(EXIT_NOT_FOUND, "entry not found"))?;
         if e.entry_type == EntryType::Tzst {
             // SPEC-GAP: no perm row is required for a tzst RUN (spec/01 kind 9 is for
             // executables); scripts are covered by their own NEED rows.
-            let (tz, _) = TzstFile::parse(pak.bytes(e)).map_err(|x| fatal(EXIT_ERROR, format!("bad tzst '{}': {x}", e.path)))?;
-            if tz.tun.header.width != pak.dict.header.width {
-                return Err(fatal(EXIT_ERROR, format!("tzst '{}': width does not match the pak", e.path)));
-            }
-            let prog = Program::build(&tz.tun.consts, &tz.tun.code, tz.tun.header.width, &tz.fns)?;
+            let unit = svc.script_entry(e).map_err(|m| fatal(EXIT_ERROR, m))?;
             let env = std::mem::take(&mut self.env);
-            let mut nested = Vm::script(&prog, &mut *self.io, env, self.limits);
+            let mut nested = Vm::script(&unit.prog, &mut *self.io, env, self.limits).with_services(svc);
+            nested.base_depth = self.base_depth + self.callers.len();
             let code = nested.run_script();
             self.env = nested.env;
             self.env.last_exit = code;
             return Ok(if code != 0 { Some(code) } else { None });
         }
         let vars = &self.cur.vars;
-        let st = run_exec::run(pak, sb, r, opts, &|i| {
-            vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m))
-        })?;
+        let st = run_exec::run(svc, r, &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io)?;
         self.env.last_exit = st;
         Ok(None)
+    }
+}
+
+fn kind_name(k: PermKind) -> &'static str {
+    match k {
+        PermKind::ReadDir => "read_dir",
+        PermKind::WriteDir => "write_dir",
+        PermKind::ReadFile => "read_file",
+        PermKind::WriteFile => "write_file",
+        PermKind::Camera => "camera",
+        PermKind::Mic => "mic",
+        PermKind::Net => "net",
+        PermKind::Mem => "mem",
+        PermKind::RunExec => "run_exec",
     }
 }
 

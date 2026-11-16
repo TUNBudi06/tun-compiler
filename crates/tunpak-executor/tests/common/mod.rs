@@ -53,6 +53,7 @@ pub struct Asm {
     fix: Vec<(usize, String)>,
     pub consts: std::cell::RefCell<Vec<Const>>,
     fns: Vec<(String, u8, String)>,
+    imports: Vec<String>,
 }
 
 impl Asm {
@@ -77,6 +78,22 @@ impl Asm {
             self.fix.push((self.code.len() - 4, l));
         }
         self
+    }
+    /// Register an import; returns its import_idx.
+    pub fn import(&mut self, path: &str) -> u8 {
+        if let Some(i) = self.imports.iter().position(|p| p == path) {
+            return i as u8;
+        }
+        self.imports.push(path.to_string());
+        (self.imports.len() - 1) as u8
+    }
+    /// `@dst = path.fn(args)`; fn_id and argc given explicitly (args pushed in order).
+    pub fn call_lib(&mut self, dst: u8, path: &str, fn_id: u16, args: &[L]) -> &mut Self {
+        let idx = self.import(path);
+        for a in args {
+            self.push(*a);
+        }
+        self.op(O::CallLib, &[va(dst), u(idx), u16a(fn_id), u(args.len() as u8)])
     }
     pub fn k_i(&self, n: i64) -> u64 {
         let c = Const::Int(n as u64);
@@ -170,7 +187,7 @@ impl Asm {
         TzstFile {
             tun: TunFile { header: TunHeader::new(Width::W4), consts: self.consts.into_inner(), code },
             fns,
-            imports: vec![],
+            imports: self.imports,
         }
     }
 }

@@ -348,8 +348,7 @@ fn static_checks() {
         ("start {\n halt; }\nstart { halt; }", 3, "duplicate start"),
         ("NEED read @x;", 1, "string literal"),
         ("NEED read \"/a\" + \"b\";", 1, "expected ';'"),
-        ("import \"std/json\" as json;", 1, "imports are not supported yet"),
-        ("start {\n let @x = json.parse(1);\n}", 2, "imports are not supported yet"),
+        ("start {\n let @x = json.parse(1);\n}", 2, "lib 'json' used without import"),
         ("start {\n return 1;\n}", 2, "outside a function"),
         ("fn f() -> (@a, @b) {\n return (1, 2, 3);\n}", 2, "returns 2"),
         ("start {\n let @l = [1];\n let @v = pop 5;\n}", 3, "pop needs a variable"),
@@ -376,4 +375,98 @@ fn var_indices() {
     let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
     let vars: Vec<_> = ins.iter().filter(|i| i.op == O::Let).map(|i| i.args[0].clone()).collect();
     assert_eq!(vars, [Arg::Var(0), Arg::Var(5), Arg::Var(1)]);
+}
+
+// ---------------------------------------------------------------- v2: imports / lib calls
+
+use tunpak_format::libfn::{LibFn, LibTable};
+use tunpak_format::types::ValueType;
+
+fn fake(p: &str) -> Result<LibTable, String> {
+    let f = |fn_id, name: &str, arg_count, ret_type| LibFn { fn_id, arg_count, ret_type, name: name.into() };
+    match p {
+        "lib/zstd" => Ok(LibTable { functions: vec![f(0, "decompress", 1, ValueType::Buf)] }),
+        "scripts/utils" => Ok(LibTable { functions: vec![f(0, "pair", 1, ValueType::None)] }),
+        _ => Err(format!("no such module '{p}'")),
+    }
+}
+fn cw(src: &str) -> Result<TzstOutput, CompileError> {
+    crate::compile_tzst_with(src, Width::W4, &fake)
+}
+fn calls(o: &TzstOutput) -> Vec<Vec<Arg>> {
+    decode_all(&o.file.tun.code, Width::W4).unwrap().into_iter().filter(|i| i.op == O::CallLib).map(|i| i.args).collect()
+}
+
+#[test]
+fn std_lib_calls() {
+    let o = ok("import \"std/json\" as json;\nimport \"std/term\" as term;\nstart {\n let @a = json.parse(\"{}\");\n json.stringify(@a);\n print term.red(term.bold(\"x\"));\n}");
+    assert_eq!(o.file.imports, ["std/json", "std/term"]);
+    sane(&o, Width::W4);
+    let cs = calls(&o);
+    assert_eq!(cs.len(), 4);
+    assert_eq!(cs[0][1..], [Arg::U8(0), Arg::U16(0), Arg::U8(1)]); // json.parse
+    assert_eq!(cs[1][1..], [Arg::U8(0), Arg::U16(1), Arg::U8(1)]); // json.stringify
+    assert_eq!(cs[2][1..], [Arg::U8(1), Arg::U16(4), Arg::U8(1)]); // term.bold (inner first)
+    assert_eq!(cs[3][1..], [Arg::U8(1), Arg::U16(0), Arg::U8(1)]); // term.red
+}
+
+#[test]
+fn lib_errors() {
+    let cases: &[(&str, &str)] = &[
+        ("start { let @a = json.parse(1); }", "used without import"),
+        ("import \"std/json\" as json;\nstart { json.nope(1); }", "unknown function 'nope' in lib 'std/json'"),
+        ("import \"std/json\" as json;\nstart { json.parse(1, 2); }", "expects 1"),
+        ("import \"run/x\" as x;", "use RUN / LOAD_SRV"),
+        ("import \"std/json\" as a;\nimport \"std/hex\" as a;", "duplicate import alias"),
+        ("import \"std/json\" as a;\nimport \"std/json\" as b;", "duplicate import"),
+        ("import \"std/nope\" as n;", "unknown std lib"),
+        ("import \"lib/zstd\" as z;", "without a module"),
+        ("start { }\nimport \"std/json\" as j;", "before 'fn' and 'start'"),
+        ("start { if 1 { halt; } else if 2 { halt; } }", "use 'elif'"),
+    ];
+    for (src, msg) in cases {
+        let e = c(src).expect_err(src);
+        assert!(e.msg.contains(msg), "{src:?}: got {e}");
+    }
+}
+
+#[test]
+fn resolver_and_exports() {
+    let o = cw("import \"lib/zstd\" as zstd;\nimport \"utils\" as utils;\nstart { let @b = zstd.decompress(\"x\"); let (@p, @q) = utils.pair(1); }").unwrap();
+    assert_eq!(o.file.imports, ["lib/zstd", "scripts/utils"]);
+    assert!(calls(&o).len() == 2);
+    assert!(cw("import \"nothing\" as n;").unwrap_err().msg.contains("no such module"));
+    let u = ok("fn pair(@a) -> (@x, @y) { return (@a, @a); }\nfn one() -> @r { return 1; }");
+    let t = crate::script_exports(&u.file);
+    let v: Vec<_> = t.functions.iter().map(|f| (f.fn_id, f.arg_count, f.name.as_str())).collect();
+    assert_eq!(v, [(0, 1, "pair"), (1, 0, "one")]);
+}
+
+#[test]
+fn list_imports_normalizes() {
+    let l = crate::list_imports("import \"utils\" as u; import \"parser/header\" as h; import \"std/json\" as j; import \"lib/zstd\" as z;").unwrap();
+    assert_eq!(l, ["scripts/utils", "scripts/parser/header", "std/json", "lib/zstd"]);
+}
+
+#[test]
+fn spec_unpacker_example() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/04-language.md")).unwrap();
+    let j = src.find("### Full example (unpacker)").expect("unpacker example");
+    let s = j + src[j..].find("```tzst").unwrap() + 7;
+    let end = s + src[s..].find("```").unwrap();
+    cw(&src[s..end]).unwrap_or_else(|e| panic!("{e}\n{}", &src[s..end]));
+}
+
+#[test]
+fn fstring_nested_string_and_braces() {
+    let o = ok("start { let @o = {\"k\": 1}; let @s = \"a,b\"; print f\"o={@o[\"k\"]} n={len(split @s \",\")}\"; print f\"{{x}}\"; }");
+    sane(&o, Width::W4);
+}
+
+#[test]
+fn multi_level_index_assign() {
+    let o = ok("start { let @a = [[1, 2], [3, 4]]; @a[1][0] = 9; let @o = {\"k\": [1]}; @o[\"k\"][0] = 5; @a[0][1] = @a[1][0]; }");
+    sane(&o, Width::W4);
+    let ops: Vec<_> = decode_all(&o.file.tun.code, Width::W4).unwrap().into_iter().map(|i| i.op).collect();
+    assert!(ops.iter().filter(|o| **o == O::ArrSet).count() >= 2 && ops.contains(&O::ObjGet) && ops.contains(&O::ArrGet));
 }

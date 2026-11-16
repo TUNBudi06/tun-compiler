@@ -1,11 +1,13 @@
 //! `tunpak inspect`: human-readable dump of a .pak.
 use std::fmt::Write;
 
-use tunpak_format::dict::{Dict, Perm, RunArg};
+use tunpak_format::dict::{Dict, Entry, Perm, RunArg};
+use tunpak_format::layout::{TUN_HEADER_LEN, TUN_OFF_FLAGS};
+use tunpak_format::libfn::LibTable;
 use tunpak_format::pak::{split_signature, PakHeader};
 use tunpak_format::tun::TunFile;
 use tunpak_format::tzst::TzstFile;
-use tunpak_format::types::EntryType;
+use tunpak_format::types::{EntryType, ENTRY_COMPRESSED, ENTRY_ENCRYPTED, ENTRY_EXECUTABLE, TUN_COMPRESSED};
 
 use crate::packer::BuildError;
 
@@ -25,11 +27,18 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
         x.version, x.app_id, x.author_id, x.pak_version, x.min_exec_ver, x.key_mode, x.build_time, x.pubkey_id, x.gflags, x.width.bytes()
     );
     let _ = writeln!(w, "\nentries ({}):", d.entries.len());
-    let _ = writeln!(w, "  ref type   flags arch platform offset size orig_size path");
+    let _ = writeln!(w, "  ref type   flags arch platform offset size orig_size hash8 path");
     for e in &d.entries {
+        let mut fl = String::new();
+        for (bit, n) in [(ENTRY_COMPRESSED, "compressed"), (ENTRY_ENCRYPTED, "encrypted"), (ENTRY_EXECUTABLE, "executable")] {
+            if e.flags & bit != 0 {
+                fl.push_str(&format!(" {n}"));
+            }
+        }
+        let h8: String = e.hash[..8].iter().map(|b| format!("{b:02x}")).collect();
         let _ = writeln!(
             w,
-            "  {:<3} {:<6} {:#04x}  {:?} {:?} {} {} {} {}",
+            "  {:<3} {:<6} {:#04x}  {:?} {:?} {} {} {} {h8} {}{fl}",
             e.ref_id, format!("{:?}", e.entry_type), e.flags, e.arch, e.platform, e.offset, e.size, e.orig_size, e.path
         );
     }
@@ -53,18 +62,37 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
         }
     }
     if let Some(e) = d.entries.iter().find(|e| e.entry_type == EntryType::Tun) {
-        let body = pak
-            .get(e.offset as usize..(e.offset as usize).saturating_add(e.size as usize))
-            .ok_or_else(|| BuildError::Msg("main.tun entry out of range".into()))?;
-        let (t, _) = TunFile::parse(body)?;
-        let dis = tunpak_tzst::disassemble(&t.code, &t.consts, t.header.width).map_err(BuildError::Compile)?;
-        let _ = writeln!(w, "\nmain.tun disassembly:\n{dis}");
+        match plain(pak, e)? {
+            None => {
+                let _ = writeln!(w, "\nmain.tun disassembly: <encrypted>");
+            }
+            Some(body) => {
+                let (t, _) = TunFile::parse(&body)?;
+                let dis = tunpak_tzst::disassemble(&t.code, &t.consts, t.header.width).map_err(BuildError::Compile)?;
+                let _ = writeln!(w, "\nmain.tun disassembly:\n{dis}");
+            }
+        }
+    }
+    for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Lib) {
+        match plain(pak, e)? {
+            None => {
+                let _ = writeln!(w, "\n{} export table: <encrypted>", e.path);
+            }
+            Some(body) => {
+                let (t, _) = LibTable::parse(&body)?;
+                let _ = writeln!(w, "\n{} exports ({}):", e.path, t.functions.len());
+                for f in &t.functions {
+                    let _ = writeln!(w, "  fn {} {} argc {} ret {:?}", f.fn_id, f.name, f.arg_count, f.ret_type);
+                }
+            }
+        }
     }
     for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Tzst) {
-        let body = pak
-            .get(e.offset as usize..(e.offset as usize).saturating_add(e.size as usize))
-            .ok_or_else(|| BuildError::Msg(format!("{} entry out of range", e.path)))?;
-        let (t, _) = TzstFile::parse(body)?;
+        let Some(body) = plain(pak, e)? else {
+            let _ = writeln!(w, "\n{} <encrypted>", e.path);
+            continue;
+        };
+        let (t, _) = TzstFile::parse(&body)?;
         let _ = writeln!(w, "\n{} fn table ({}):", e.path, t.fns.len());
         for (id, f) in t.fns.iter().enumerate() {
             let _ = writeln!(w, "  fn {id} {} argc {} addr {}", f.name, f.argc, f.addr);
@@ -77,4 +105,26 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
         let _ = writeln!(w, "{} disassembly:\n{dis}", e.path);
     }
     Ok(s)
+}
+
+/// The entry's plaintext, or None when it is encrypted (inspect never decrypts). Compressed
+/// entries are inflated (main.tun: header kept, body inflated, header flags cleared).
+fn plain(pak: &[u8], e: &Entry) -> Result<Option<Vec<u8>>, BuildError> {
+    let stored = pak
+        .get(e.offset as usize..(e.offset as usize).saturating_add(e.size as usize))
+        .ok_or_else(|| BuildError::Msg(format!("{} entry out of range", e.path)))?;
+    if e.flags & ENTRY_ENCRYPTED != 0 {
+        return Ok(None);
+    }
+    if e.flags & ENTRY_COMPRESSED == 0 {
+        return Ok(Some(stored.to_vec()));
+    }
+    let hl = if e.entry_type == EntryType::Tun { TUN_HEADER_LEN.min(stored.len()) } else { 0 };
+    let body = tunpak_crypto::compress::decompress(&stored[hl..], (e.orig_size as usize).saturating_sub(hl)).map_err(|x| BuildError::Msg(format!("{}: {x}", e.path)))?;
+    let mut out = stored[..hl].to_vec();
+    if hl == TUN_HEADER_LEN {
+        out[TUN_OFF_FLAGS] &= !TUN_COMPRESSED;
+    }
+    out.extend(body);
+    Ok(Some(out))
 }

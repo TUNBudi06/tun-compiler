@@ -41,7 +41,11 @@ fn file(code: Vec<u8>, nfns: u32) -> TzstFile {
     let fns = (0..nfns)
         .map(|i| FnInfo { addr: (i * 7) % (code.len() as u32 + 1), argc: (i % 3) as u8, name: format!("f{i}") })
         .collect();
-    TzstFile { tun: TunFile { header: TunHeader::new(Width::W4), consts: consts(), code }, fns, imports: vec![] }
+    let imports = ["std/json", "std/regex", "std/math", "std/base64", "std/hex", "std/time", "std/term", "scripts/x", "lib/y", "run/z"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    TzstFile { tun: TunFile { header: TunHeader::new(Width::W4), consts: consts(), code }, fns, imports }
 }
 
 fn fuzz_opts() -> RunOptions {

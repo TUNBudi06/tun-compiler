@@ -1,6 +1,7 @@
 //! AST -> bytecode. Every instruction goes through `operands::encode` so layouts cannot drift;
 //! stack discipline and operand meanings are those documented in `tunpak_format::operands`.
 use crate::checker::{scope_types, sigs, ty_of, Sigs, Ty};
+use tunpak_format::libfn::LibTable;
 use crate::parser::*;
 use crate::CompileError;
 use std::collections::HashMap;
@@ -41,13 +42,13 @@ struct Gen {
     ret_jumps: Vec<usize>,
 }
 
-pub fn generate(p: &Program, width: Width) -> Res<(TzstFile, Vec<Perm>)> {
+pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile, Vec<Perm>)> {
     let mut g = Gen {
         width,
         consts: vec![],
         code: vec![],
         fn_ids: p.fns.iter().enumerate().map(|(i, f)| (f.name.clone(), i as u16)).collect(),
-        sigs: sigs(p)?,
+        sigs: sigs(p, tables)?,
         sc: Scope::default(),
         pos: (1, 1),
         loops: vec![],
@@ -99,7 +100,7 @@ pub fn generate(p: &Program, width: Width) -> Res<(TzstFile, Vec<Perm>)> {
             g.patch(s, end);
         }
     }
-    let file = TzstFile { tun: TunFile { header: TunHeader::new(width), consts: g.consts, code: g.code }, fns, imports: vec![] };
+    let file = TzstFile { tun: TunFile { header: TunHeader::new(width), consts: g.consts, code: g.code }, fns, imports: p.imports.iter().map(|i| i.path.clone()).collect() };
     Ok((file, perms))
 }
 
@@ -341,6 +342,11 @@ impl Gen {
                 self.ins(O::Slice, &[Arg::Var(v), Arg::Src(off), Arg::Src(len)])
             }
             EK::Call(name, args) => self.call(name, args),
+            EK::LibCall(..) => {
+                let t = self.temp()?;
+                self.lib_call(e, t)?;
+                self.ins(O::PushVar, &[Arg::Var(t)])
+            }
             EK::Prefix(p, args) => self.prefix_push(*p, args),
         }
     }
@@ -388,6 +394,25 @@ impl Gen {
                 self.ins(O::CallFn, &[Arg::U16(id), Arg::U8(args.len() as u8)])
             }
         }
+    }
+
+    /// `alias.fn(args)`: args pushed left-to-right, result into var `dst`.
+    fn lib_call(&mut self, e: &Expr, dst: u8) -> Res<()> {
+        let EK::LibCall(_, _, args) = &e.k else { unreachable!() };
+        for a in args {
+            self.push(a)?;
+        }
+        self.lib_call_pushed(e, dst)
+    }
+
+    /// Emit CALL_LIB for `e` whose args are already on the stack.
+    fn lib_call_pushed(&mut self, e: &Expr, dst: u8) -> Res<()> {
+        let EK::LibCall(alias, name, args) = &e.k else { unreachable!() };
+        self.pos = e.pos;
+        let (idx, t) = self.sigs.libs.get(alias).ok_or_else(|| self.err(format!("lib '{alias}' used without import")))?;
+        let lf = t.find(name).ok_or_else(|| self.err(format!("unknown function '{name}' in lib '{alias}'")))?;
+        let (idx, id) = (*idx, lf.fn_id);
+        self.ins(O::CallLib, &[Arg::Var(dst), Arg::U8(idx), Arg::U16(id), Arg::U8(args.len() as u8)])
     }
 
     fn is_dest_op(p: Pre) -> bool {
@@ -570,6 +595,13 @@ impl Gen {
                 }
             }
             EK::Prefix(p, a) if Self::is_dest_op(*p) => self.dest_op(*p, a, &d),
+            EK::LibCall(_, _, args) => {
+                for a in args {
+                    self.push(a)?;
+                }
+                let v = self.slot(&d)?;
+                self.lib_call_pushed(e, v)
+            }
             _ => {
                 self.push(e)?;
                 let v = self.slot(&d)?;
@@ -608,9 +640,18 @@ impl Gen {
                 }
                 Ok(())
             }
-            SK::IndexAssign(n, i, v) => {
-                let var = self.lookup(n)?;
-                let bt = self.sc.types.get(n).copied().unwrap_or(Ty::Unknown);
+            SK::IndexAssign(n, idxs, v) => {
+                let (i, head) = idxs.split_last().unwrap();
+                // container chain up to the last index is read into a temp (arrays/objects are references)
+                let (var, bt) = if head.is_empty() {
+                    (self.lookup(n)?, self.sc.types.get(n).copied().unwrap_or(Ty::Unknown))
+                } else {
+                    let mut c = Expr { k: EK::Var(n.clone()), pos: s.pos };
+                    for x in head {
+                        c = Expr { k: EK::Index(Box::new(c), Box::new(x.clone())), pos: s.pos };
+                    }
+                    (self.var_of(&c)?, self.ty(&c))
+                };
                 if self.use_obj(bt, self.ty(i)) {
                     self.push(i)?;
                     self.push(v)?;
@@ -794,6 +835,10 @@ impl Gen {
                 Ok(())
             }
             SK::Expr(e) => {
+                if let EK::LibCall(..) = &e.k {
+                    let t = self.temp()?;
+                    return self.lib_call(e, t);
+                }
                 if let EK::Prefix(p, a) = &e.k {
                     if Self::is_dest_op(*p) {
                         let t = self.temp()?;

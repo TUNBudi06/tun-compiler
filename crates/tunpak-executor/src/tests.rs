@@ -40,7 +40,7 @@ fn make_pak_full(code: Vec<u8>, consts: Vec<Const>, entries: Vec<E>, perms: Vec<
             size: e.data.len() as u32,
             orig_size: e.data.len() as u32,
             nonce: [0; 12],
-            hash: [0; 32],
+            hash: tunpak_crypto::hash::sha256(&e.data), // dev still checks hashes (builder writes them)
             path: e.path.into(),
         });
         blob.extend_from_slice(&e.data);
@@ -160,11 +160,19 @@ fn entry_out_of_bounds() {
 }
 
 #[test]
-fn flagged_entries_rejected() {
+fn flagged_entry_that_is_not_really_compressed_fails_when_used() {
+    // v2: compressed/encrypted entries are supported, so a bogus flag is only an error once the
+    // entry is actually opened (hash ok, then decompress of garbage fails).
     let mut e = script(7, "r.sh", "exit 0");
     e.flags |= 1;
-    let pak = make_pak(vec![0, 3], vec![], vec![e], vec![]);
-    assert!(run_pak_bytes(&pak, &dev()).unwrap_err().msg.contains("not supported"));
+    let mut code = vec![];
+    op(&mut code, 0x12, &r4(7));
+    let pak = make_pak(code, vec![], vec![e], vec![run_perm("r.sh", vec![])]);
+    assert!(run_pak_bytes(&pak, &dev()).unwrap_err().msg.contains("decompression failed"));
+    // never used -> never opened
+    let mut e = script(7, "r.sh", "exit 0");
+    e.flags |= 1;
+    assert_eq!(run_pak_bytes(&make_pak(vec![0, 3], vec![], vec![e], vec![]), &dev()), Ok(0));
 }
 
 #[test]
@@ -275,12 +283,12 @@ fn flag_value_is_int() {
 }
 
 #[test]
-fn unset_var_and_load_srv() {
+fn unset_var_and_load_srv_errors() {
     let mut code = vec![];
     op(&mut code, 0x40, &[3]);
     assert!(run_pak_bytes(&make_pak(code, vec![], vec![], vec![]), &dev()).unwrap_err().msg.contains("unset"));
     let mut code = vec![];
-    op(&mut code, 0x11, &[100, 0, 0, 0, 1]);
+    op(&mut code, 0x11, &[100, 0, 0, 0, 1]); // main.tun is not a run entry
     assert!(run_pak_bytes(&make_pak(code, vec![], vec![], vec![]), &dev()).unwrap_err().msg.contains("LOAD_SRV"));
 }
 
@@ -409,7 +417,11 @@ fn run_tzst_shares_need_roots_with_launcher_state() {
         vec![s("/tmp")],
         &[(Opcode::Need, vec![Arg::U8(1), Arg::CRef(0)]), (Opcode::Halt, vec![])],
     );
-    let (r, _, _) = run_io(&run_then_exit(tzst_entry(8, t)));
+    let mut code = vec![];
+    op(&mut code, 0x12, &r4(8));
+    op(&mut code, 6, &[5, 0]);
+    let pak = make_pak(code, vec![s("end")], vec![tzst_entry(8, t)], vec![Perm::Path { kind: tunpak_format::types::PermKind::ReadDir, path: "/tmp".into() }]);
+    let (r, _, _) = run_io(&pak);
     assert_eq!(r, Ok(5));
 }
 

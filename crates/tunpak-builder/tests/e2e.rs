@@ -58,7 +58,20 @@ fn spec07_refs() {
     put(&d, "lib/zstd_lib.so", "L");
     put(&d, "run/api", "R");
     put(&d, "scripts/app_tzst.tzst", "");
-    let pak = pack_module(&d, &PackOptions::default()).unwrap();
+    // v2 loads every lib/*.so for its export table; this fixture's "lib" is a placeholder, so fake the loader.
+    let hooks = tunpak_builder::Hooks {
+        load_lib: |_, _| {
+            Ok(tunpak_builder::libs::LibInfo {
+                abi_version: Some(1),
+                lfnt: b"LFNT\0\0".to_vec(),
+                table: Default::default(),
+                arch: tunpak_format::types::Arch::Any,
+                platform: tunpak_format::types::Platform::Any,
+            })
+        },
+        ..tunpak_builder::Hooks::real()
+    };
+    let pak = tunpak_builder::pack_with(&d, &PackOptions::default(), &hooks).unwrap();
     let (h, _) = PakHeader::parse(&pak).unwrap();
     let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
     let r = |p: &str| dict.entries.iter().find(|e| e.path == p).unwrap().ref_id as u32;
@@ -575,25 +588,21 @@ print "after";"#,
 
     // Lib / imports: milestone v2
     #[test]
-    #[ignore = "v2: libs/imports"]
     fn edge_json_parse_malformed() {
         let r = run_src("import \"std/json\" as json;\nstart { let @m = json.parse(\"{\\\"a\\\": }\"); }\n");
         assert_ne!(r.code, 0);
         assert!(r.err.contains("line") && r.err.contains("col"), "{r:?}");
     }
     #[test]
-    #[ignore = "v2: libs/imports"]
     fn edge_lib_without_import() {
         compile_err("let @x = json.parse(\"1\");");
     }
     #[test]
-    #[ignore = "v2: libs/imports"]
     fn edge_unknown_lib_fn() {
         let src = "import \"std/json\" as json;\nstart { let @x = json.nosuchfn(\"1\"); }\n";
         assert!(compile_tzst(src, Width::W4).is_err());
     }
     #[test]
-    #[ignore = "v2: libs/imports"]
     fn edge_circular_import() {
         let d = tmp("e-circ");
         put(&d, "main.tun", "MAIN { run \"scripts/a\"; }");
@@ -604,7 +613,6 @@ print "after";"#,
         fs::remove_dir_all(d).unwrap();
     }
     #[test]
-    #[ignore = "v2: libs/imports"]
     fn edge_term_nested() {
         golden_src(
             "import \"std/term\" as term;\nstart { print term.red(term.bold(\"x\")); }\n",

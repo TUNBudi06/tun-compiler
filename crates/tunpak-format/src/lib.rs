@@ -9,6 +9,7 @@
 //!   and a serialize↔parse round-trip test.
 //! - Parsers never panic on hostile input: every read is bounds-checked → `FormatError`.
 
+pub mod abi;
 pub mod buildreq;
 pub mod config;
 pub mod dict;
@@ -18,6 +19,7 @@ pub mod libfn;
 pub mod opcodes;
 pub mod operands;
 pub mod pak;
+pub mod stdlib;
 pub mod tun;
 pub mod types;
 pub mod tzst;

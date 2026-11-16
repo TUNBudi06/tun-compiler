@@ -2,9 +2,13 @@
 //! A library so the builder's `tunpak dev run` and integration tests share the exact VM;
 //! `main.rs` is the thin shipped binary.
 
+pub mod crypto;
+pub mod generated_keys;
 pub mod loader;
+pub mod perm;
 pub mod platform;
 pub mod sandbox;
+pub mod stdlib;
 pub mod verify;
 pub mod vm;
 
@@ -30,6 +34,42 @@ pub struct RunOptions {
     pub mem_limit: Option<u64>,
     /// Budget of the ON_EXIT handler (default 5 s).
     pub on_exit_timeout_ms: Option<u64>,
+    /// Trusted identity/keys. `None` = the constants compiled in from `generated_keys.rs`.
+    pub trust: Option<Trust>,
+    /// Auto-approve the manifest and every RUN prompt (tests, `--yes`).
+    pub assume_yes: bool,
+    /// Force `$TERM_COLOR` (default: detect). Mainly for tests.
+    pub term_color: Option<bool>,
+}
+
+/// One trusted signing key (spec/06 rotation + revocation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedKey {
+    pub id: u8,
+    pub public: [u8; 32],
+    pub revoked: bool,
+}
+
+/// What this executor trusts. `app_id`/`author_id` `Some` = pak must match (anti pak-swap).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trust {
+    pub app_id: Option<u32>,
+    pub author_id: Option<u32>,
+    pub keys: Vec<TrustedKey>,
+    pub master_key: Option<[u8; 32]>,
+}
+
+impl Trust {
+    /// The values the build server compiled in (`generated_keys.rs`).
+    pub fn compiled() -> Trust {
+        use generated_keys as g;
+        Trust {
+            app_id: g::APP_ID,
+            author_id: g::AUTHOR_ID,
+            keys: g::PUBKEYS.iter().map(|&(id, public, revoked)| TrustedKey { id, public, revoked }).collect(),
+            master_key: g::MASTER_KEY,
+        }
+    }
 }
 
 /// All program output (PRINT, prompts, EXIT text, error messages) and input go through this.
@@ -74,14 +114,20 @@ pub fn run_pak_bytes(pak: &[u8], opts: &RunOptions) -> Result<i32, ExecError> {
 
 /// Same as `run_pak_bytes` but with explicit I/O.
 pub fn run_pak_bytes_io(pak: &[u8], opts: &RunOptions, io: &mut Io) -> Result<i32, ExecError> {
-    run_inner_io(pak, opts, io).map(|(code, _)| code)
+    run_inner_io(pak, opts, None, io).map(|(code, _)| code)
+}
+
+/// Run one tzst entry of a pak directly instead of main.tun (used by `tunpak dev run x.tzst`);
+/// path like "scripts/main.tzst". The pak goes through the same verify/approve pipeline.
+pub fn run_pak_entry_io(pak: &[u8], entry_path: &str, opts: &RunOptions, io: &mut Io) -> Result<i32, ExecError> {
+    run_inner_io(pak, opts, Some(entry_path), io).map(|(code, _)| code)
 }
 
 /// Run one compiled .tzst directly (used by `tunpak dev run` and golden tests). Returns the exit
 /// code: `Ok(code)` whenever the script ran to an end (HALT 0, EXIT n, uncaught error 1 with the
 /// message on `io.err`, permission violation 126); `Err` only for executor-side failures.
 pub fn run_tzst(file: &tunpak_format::tzst::TzstFile, opts: &RunOptions, io: &mut Io) -> Result<i32, ExecError> {
-    let prog = vm::program::Program::build(&file.tun.consts, &file.tun.code, file.tun.header.width, &file.fns)?;
+    let prog = vm::program::Program::from_tzst(file)?;
     let sb = sandbox::Sandbox::new()?;
     let env = vm::interp::Env {
         dev: opts.dev,
@@ -90,19 +136,49 @@ pub fn run_tzst(file: &tunpak_format::tzst::TzstFile, opts: &RunOptions, io: &mu
         ver: 0,
         last_exit: 0,
         perms: Default::default(),
+        term_color: opts.term_color,
     };
     let mut vm = vm::interp::Vm::script(&prog, io, env, vm::interp::Limits::from_opts(opts));
     Ok(vm.run_script())
 }
 
-/// Returns (exit code, final `$?`). Order matters: verify -> parse -> run (invariant 4).
-fn run_inner_io(pak: &[u8], opts: &RunOptions, io: &mut Io) -> Result<(i32, i32), ExecError> {
-    let signed = verify::verify(pak, opts)?;
-    let pak = loader::Pak::load(signed)?;
+/// Returns (exit code, final `$?`). Order matters (invariant 4): signature -> parse -> checks ->
+/// approval -> run. Entry hashes/decryption happen lazily inside `Pak::data`, hash first.
+fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io) -> Result<(i32, i32), ExecError> {
+    let trust = opts.trust.clone().unwrap_or_else(Trust::compiled);
+    // 1+2: split, then Ed25519 verify. Nothing is parsed before this returns.
+    let verified = verify::verify(pak, opts, &trust)?;
+    // 3: only now parse PakHeader + Dict and check identity/version/bounds.
+    let pak = loader::Pak::load(verified.signed, verified.key_id, &trust, opts)?;
+    // Approval of the signed permission table, before anything runs.
+    if !perm::approve_manifest(&pak.dict, opts, io)? {
+        let _ = writeln!(io.err, "{}", obfstr::obfstr!("permission manifest declined by user"));
+        return Ok((EXIT_PERM_DENIED, 0));
+    }
+    let sb = sandbox::Sandbox::new()?; // removed on drop, on every return path
+    let svc = loader::Services::new(&pak, &sb, opts);
+    if let Some(path) = entry {
+        let e = pak
+            .find_path(path)
+            .filter(|e| e.entry_type == tunpak_format::types::EntryType::Tzst)
+            .ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, format!("pak has no tzst entry '{path}'")))?;
+        let unit = svc.script_entry(e).map_err(|m| ExecError::new(EXIT_ERROR, m))?;
+        let env = vm::interp::Env {
+            dev: opts.dev,
+            args: opts.args.clone(),
+            tmp: sb.dir().to_path_buf(),
+            ver: pak.dict.header.pak_version as i64,
+            last_exit: 0,
+            perms: Default::default(),
+            term_color: opts.term_color,
+        };
+        let mut vm = vm::interp::Vm::script(&unit.prog, io, env, vm::interp::Limits::from_opts(opts)).with_services(&svc);
+        let code = vm.run_script();
+        return Ok((code, vm.env.last_exit));
+    }
     let tun = pak.tun()?;
     let prog = vm::program::Program::build(&tun.consts, &tun.code, tun.header.width, &[])?;
-    let sb = sandbox::Sandbox::new()?; // removed on drop, on every return path
-    let mut vm = vm::interp::Vm::launcher(&prog, &pak, &sb, opts, io);
+    let mut vm = vm::interp::Vm::launcher(&prog, &svc, io);
     let code = vm.run_launcher()?;
     Ok((code, vm.env.last_exit))
 }
@@ -111,7 +187,7 @@ fn run_inner_io(pak: &[u8], opts: &RunOptions, io: &mut Io) -> Result<(i32, i32)
 fn run_inner(pak: &[u8], opts: &RunOptions) -> Result<(i32, i32), ExecError> {
     let (stdout, stderr, stdin) = (std::io::stdout(), std::io::stderr(), std::io::stdin());
     let (mut out, mut err, mut input) = (stdout.lock(), stderr.lock(), stdin.lock());
-    run_inner_io(pak, opts, &mut Io { out: &mut out, err: &mut err, input: &mut input })
+    run_inner_io(pak, opts, None, &mut Io { out: &mut out, err: &mut err, input: &mut input })
 }
 
 #[cfg(test)]

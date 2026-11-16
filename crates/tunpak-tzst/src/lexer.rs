@@ -68,9 +68,28 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                 adv!();
                 adv!();
                 let st = i;
-                while i < cs.len() && cs[i] != '"' {
-                    if cs[i] == '\\' && i + 1 < cs.len() {
-                        adv!();
+                let mut depth = 0usize;
+                while i < cs.len() && !(depth == 0 && cs[i] == '"') {
+                    match cs[i] {
+                        '\\' if i + 1 < cs.len() => adv!(),
+                        // `{{` is a literal brace (parser); otherwise `{` opens an expression
+                        '{' if depth == 0 && cs.get(i + 1) == Some(&'{') => adv!(),
+                        '{' => depth += 1,
+                        '}' if depth > 0 => depth -= 1,
+                        '"' => {
+                            // string literal inside `{...}`: skip it whole (with escapes)
+                            adv!();
+                            while i < cs.len() && cs[i] != '"' {
+                                if cs[i] == '\\' && i + 1 < cs.len() {
+                                    adv!();
+                                }
+                                adv!();
+                            }
+                            if i >= cs.len() {
+                                return Err(err("unterminated f-string".into()));
+                            }
+                        }
+                        _ => {}
                     }
                     adv!();
                 }

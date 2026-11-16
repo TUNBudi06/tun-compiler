@@ -515,11 +515,11 @@ fn push_builtin_in_tzst() {
 }
 
 #[test]
-fn call_lib_is_not_available() {
+fn call_lib_without_import_is_an_error() {
     let r = prog(|a| {
         a.op(O::CallLib, &[va(0), u(0), u16a(0), u(0)]);
     });
-    assert!(r.err.contains("CALL_LIB is not available in this build") && r.code() == 1, "{r:?}");
+    assert!(r.err.contains("import #0 out of range") && r.code() == 1, "{r:?}");
 }
 
 #[test]

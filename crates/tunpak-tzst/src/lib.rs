@@ -52,8 +52,34 @@ pub struct TzstOutput {
     pub warnings: Vec<String>,
 }
 
-/// Compile `.tzst` source text. Operand encodings and stack contract:
-/// `tunpak_format::operands` (the single source of truth shared with the VM).
+/// Resolves an import path ("std/json", "lib/zstd", "scripts/utils") to its export table.
+pub type ImportResolver<'a> = &'a dyn Fn(&str) -> Result<tunpak_format::libfn::LibTable, String>;
+
+/// Compile `.tzst` source text with only `std/*` imports available. Operand encodings and stack
+/// contract: `tunpak_format::operands` (the single source of truth shared with the VM).
 pub fn compile_tzst(src: &str, width: Width) -> Result<TzstOutput, CompileError> {
-    tzst::compile(src, width)
+    compile_tzst_with(src, width, &|p| Err(format!("cannot resolve '{p}' without a module (use the builder)")))
+}
+
+/// Compile `.tzst` source; `lib/` and `scripts/` imports are resolved by `resolve` (`std/` is built in).
+pub fn compile_tzst_with(src: &str, width: Width, resolve: ImportResolver) -> Result<TzstOutput, CompileError> {
+    tzst::compile(src, width, resolve)
+}
+
+/// The export table of a compiled script (fn_id = index; ret = None), for scripts importing scripts.
+pub fn script_exports(file: &tunpak_format::tzst::TzstFile) -> tunpak_format::libfn::LibTable {
+    use tunpak_format::libfn::{LibFn, LibTable};
+    LibTable {
+        functions: file
+            .fns
+            .iter()
+            .enumerate()
+            .map(|(i, f)| LibFn { fn_id: i as u16, arg_count: f.argc, ret_type: tunpak_format::types::ValueType::None, name: f.name.clone() })
+            .collect(),
+    }
+}
+
+/// Import paths a source file declares (normalized), without compiling it.
+pub fn list_imports(src: &str) -> Result<Vec<String>, CompileError> {
+    Ok(parser::parse(src)?.imports.into_iter().map(|i| i.path).collect())
 }
