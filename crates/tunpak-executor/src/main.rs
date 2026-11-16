@@ -27,6 +27,7 @@ fn main() {
         eprintln!("{}", ob!("error: this executor was built for distribution: --dev is not available"));
         std::process::exit(1);
     }
+    tunpak_executor::sandbox::install_signal_cleanup();
     let pak = args.remove(0);
     let opts = tunpak_executor::RunOptions { dev, assume_yes: yes, license, args, ..Default::default() };
     match tunpak_executor::run_pak(std::path::Path::new(&pak), &opts) {

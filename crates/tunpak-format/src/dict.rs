@@ -379,4 +379,71 @@ mod tests {
         assert!(t.serialize(&mut vec![]).is_err());
         assert!(Perm::Path { kind: PermKind::RunExec, path: String::new() }.serialize(&mut vec![]).is_err());
     }
+
+    /// Golden bytes against spec/01 §3: every constant equals the spec literal AND the serialized
+    /// byte sits at that constant.
+    #[test]
+    fn golden_offsets_and_perm_rows() {
+        let spec_hdr = [
+            (DICT_OFF_MAGIC, 0x00), (DICT_OFF_VERSION, 0x04), (DICT_OFF_APP_ID, 0x05), (DICT_OFF_PAK_VERSION, 0x09),
+            (DICT_OFF_MIN_EXEC_VER, 0x0D), (DICT_OFF_KEY_MODE, 0x0E), (DICT_OFF_BUILD_TIME, 0x0F),
+            (DICT_OFF_AUTHOR_ID, 0x17), (DICT_OFF_PUBKEY_ID, 0x1B), (DICT_OFF_GFLAGS, 0x1C), (DICT_OFF_WIDTH, 0x1D),
+            (DICT_OFF_ENTRY_COUNT, 0x1E), (DICT_HEADER_LEN, 0x20),
+        ];
+        for (c, spec) in spec_hdr {
+            assert_eq!(c, spec);
+        }
+        let spec_ent = [
+            (ENTRY_OFF_REF, 0x00), (ENTRY_OFF_TYPE, 0x02), (ENTRY_OFF_FLAGS, 0x03), (ENTRY_OFF_ARCH, 0x04),
+            (ENTRY_OFF_PLATFORM, 0x05), (ENTRY_OFF_OFFSET, 0x06), (ENTRY_OFF_SIZE, 0x0A), (ENTRY_OFF_ORIG_SIZE, 0x0E),
+            (ENTRY_OFF_NONCE, 0x12), (ENTRY_OFF_HASH, 0x1E), (ENTRY_OFF_PATH_LEN, 0x3E), (ENTRY_OFF_PATH, 0x3F),
+        ];
+        for (c, spec) in spec_ent {
+            assert_eq!(c, spec);
+        }
+        let mut d = sample();
+        d.perms = PermissionTable { perms: vec![] };
+        let mut o = vec![];
+        d.serialize(&mut o).unwrap();
+        let h = &d.header;
+        assert_eq!(o[DICT_OFF_VERSION], h.version);
+        assert_eq!(&o[DICT_OFF_APP_ID..][..4], 0x11223344u32.to_le_bytes());
+        assert_eq!(&o[DICT_OFF_PAK_VERSION..][..4], 5u32.to_le_bytes());
+        assert_eq!(o[DICT_OFF_MIN_EXEC_VER], 1);
+        assert_eq!(&o[DICT_OFF_BUILD_TIME..][..8], 1_700_000_000u64.to_le_bytes());
+        assert_eq!(o[DICT_OFF_PUBKEY_ID], 2);
+        let e = DICT_HEADER_LEN; // entry 0: ref 1, Tzst(6), flags 0b11, X64(1), Termux(2)
+        assert_eq!(&o[e + ENTRY_OFF_REF..][..2], 1u16.to_le_bytes());
+        assert_eq!(o[e + ENTRY_OFF_TYPE], 6);
+        assert_eq!(o[e + ENTRY_OFF_FLAGS], 0b11);
+        assert_eq!(o[e + ENTRY_OFF_ARCH], 1);
+        assert_eq!(o[e + ENTRY_OFF_PLATFORM], 2);
+        assert_eq!(&o[e + ENTRY_OFF_OFFSET..][..4], 9u32.to_le_bytes());
+        assert_eq!(&o[e + ENTRY_OFF_SIZE..][..4], 100u32.to_le_bytes());
+        assert_eq!(&o[e + ENTRY_OFF_ORIG_SIZE..][..4], 200u32.to_le_bytes());
+        assert_eq!(&o[e + ENTRY_OFF_NONCE..][..12], [7u8; 12]);
+        assert_eq!(&o[e + ENTRY_OFF_HASH..][..32], [9u8; 32]);
+        // perm table starts right after the entries: perm_count, then rows.
+        let pt = e + (0x3F + 16) + (0x3F + 8);
+        assert_eq!(o.len(), pt + 1);
+        assert_eq!(o[pt], 0);
+        let row = |p: Perm| {
+            let mut b = vec![];
+            p.serialize(&mut b).unwrap();
+            b
+        };
+        // kind 1..=8: kind + path_len:2 + path
+        assert_eq!(row(Perm::Path { kind: PermKind::ReadDir, path: "/d".into() }), [1, 2, 0, b'/', b'd']);
+        assert_eq!(row(Perm::Path { kind: PermKind::Camera, path: String::new() }), [5, 0, 0]);
+        assert_eq!(row(Perm::Path { kind: PermKind::Mem, path: "1mb".into() }), [8, 3, 0, b'1', b'm', b'b']);
+        // kind 9: path, desc, argc, (const: 0 len:2 val) (var: 1 len:1 name)
+        assert_eq!(
+            row(Perm::Run(RunExec {
+                path: "r".into(),
+                desc: "d".into(),
+                args: vec![RunArg::Const("c".into()), RunArg::Var("v".into())],
+            })),
+            [9, 1, 0, b'r', 1, 0, b'd', 2, 0, 1, 0, b'c', 1, 1, b'v']
+        );
+    }
 }

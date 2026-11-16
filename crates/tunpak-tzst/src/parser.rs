@@ -210,6 +210,7 @@ pub struct Import {
 
 /// Normalize an import path as written (`"utils"` -> `scripts/utils`). `run/` is rejected (invariant 8).
 pub fn normalize_import(raw: &str) -> Result<String, String> {
+    // SPEC-GAP: spec/04:28 lists `import "run/unpacker"`, but invariant 8 forbids importing executables; rejected.
     if raw.starts_with("run/") {
         return Err("run/ entries are executables: use RUN / LOAD_SRV in main.tun, not import".into());
     }

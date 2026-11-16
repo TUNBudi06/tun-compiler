@@ -270,28 +270,33 @@ impl Gen {
                 }
             },
             EK::Bin(Bin::And, a, b) => {
-                // a; DUP; JZ L; b; LAND; L:
+                // a; JZ F; b; 1; LAND; JMP E; F: 0; E:   (always int 0/1, right side skipped on false)
                 self.push(a)?;
-                self.ins(O::Dup, &[])?;
-                let l = self.jump(O::Jz, &[])?;
+                let f = self.jump(O::Jz, &[])?;
                 self.push(b)?;
+                self.push(&Expr { k: EK::Int(1), pos: e.pos })?;
                 self.ins(O::Land, &[])?;
+                let end = self.jump(O::Jmp, &[])?;
                 let h = self.here();
-                self.patch(l, h);
+                self.patch(f, h);
+                self.push(&Expr { k: EK::Int(0), pos: e.pos })?;
+                let h = self.here();
+                self.patch(end, h);
                 Ok(())
             }
             EK::Bin(Bin::Or, a, b) => {
-                // a; DUP; JZ R; JMP L; R: b; LOR; L:
+                // a; JZ R; 1; JMP E; R: b; 0; LOR; E:
                 self.push(a)?;
-                self.ins(O::Dup, &[])?;
                 let r = self.jump(O::Jz, &[])?;
-                let l = self.jump(O::Jmp, &[])?;
+                self.push(&Expr { k: EK::Int(1), pos: e.pos })?;
+                let end = self.jump(O::Jmp, &[])?;
                 let h = self.here();
                 self.patch(r, h);
                 self.push(b)?;
+                self.push(&Expr { k: EK::Int(0), pos: e.pos })?;
                 self.ins(O::Lor, &[])?;
                 let h = self.here();
-                self.patch(l, h);
+                self.patch(end, h);
                 Ok(())
             }
             EK::Bin(op, a, b) => {
@@ -331,10 +336,21 @@ impl Gen {
             }
             EK::Slice(b, a, z) => {
                 let v = self.var_of(b)?;
-                let off = self.src(a)?;
+                // A non-trivial start is evaluated once, into a temp.
+                let simple = matches!(a.k, EK::Int(_) | EK::Var(_) | EK::Builtin(_));
+                let hidden = if simple { None } else { Some(self.var_of(a)?) };
+                let off = match hidden {
+                    Some(t) => Src::Var(t),
+                    None => self.src(a)?,
+                };
                 // len = z - a (just z when a is the literal 0)
                 let len = if const_int(a) == Some(0) {
                     self.src(z)?
+                } else if let Some(t) = hidden {
+                    self.push(z)?;
+                    self.ins(O::PushVar, &[Arg::Var(t)])?;
+                    self.ins(O::Sub, &[])?;
+                    Src::Stack
                 } else {
                     let sub = Expr { k: EK::Bin(Bin::Sub, z.clone(), a.clone()), pos: e.pos };
                     self.src(&sub)?

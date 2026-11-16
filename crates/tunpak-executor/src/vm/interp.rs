@@ -152,7 +152,7 @@ impl<'a, 'io> Vm<'a, 'io> {
     pub fn launcher(prog: &'a Program, svc: &'a Services<'a>, io: &'a mut Io<'io>) -> Self {
         let opts = svc.opts;
         let env = Env {
-            dev: opts.dev,
+            dev: opts.dev || svc.pak.debug(), // Env.dev only gates error verbosity (`describe`)
             args: opts.args.clone(),
             tmp: svc.sb.dir().to_path_buf(),
             ver: svc.pak.dict.header.pak_version as i64,

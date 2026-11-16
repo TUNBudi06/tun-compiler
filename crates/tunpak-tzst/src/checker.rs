@@ -73,6 +73,8 @@ pub fn sigs(p: &Program, tables: &[LibTable]) -> Res<Sigs> {
     Ok(s)
 }
 
+// SPEC-GAP: spec/04:121 says `@a + @b  # or concat` without giving a form (function? prefix word?);
+// no `concat` alias is added. Use `+`.
 pub const BUILTIN_CALLS: &[(&str, usize)] = &[("int", 1), ("str", 1), ("hex", 1), ("typeof", 1), ("len", 1), ("hex_range", 3)];
 
 /// Static type of `e` given the variable types of its scope.
@@ -424,6 +426,8 @@ impl Ck {
     }
 
     /// align/padding operands are 1-byte immediates: must be literals in `lo..=255`.
+    // SPEC-GAP: spec/05 says non-constant align/padding n is "else runtime", but n is a 1-byte
+    // immediate and cannot hold a runtime value, so a non-constant n is a compile error.
     fn small_const(&mut self, x: &Expr, lo: i64, what: &str) -> Res<()> {
         match const_int(x) {
             Some(v) if (lo..=255).contains(&v) => Ok(()),

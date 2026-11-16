@@ -513,6 +513,7 @@ dependencies = [
 name = "tunpak-executor"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "obfstr",
  "tunpak-crypto",
  "tunpak-format",

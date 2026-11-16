@@ -207,8 +207,8 @@ fn jump_targets_and_shapes() {
     // short-circuit and/or
     let o = ok("start { let @a = 1; let @b = 0; let @r = @a and @b; let @q = @a or @b; }");
     let ops: Vec<O> = decode_all(&o.file.tun.code, Width::W4).unwrap().iter().map(|i| i.op).collect();
-    assert!(ops.windows(5).any(|w| w == [O::Dup, O::Jz, O::PushVar, O::Land, O::Store]));
-    assert!(ops.windows(6).any(|w| w == [O::Dup, O::Jz, O::Jmp, O::PushVar, O::Lor, O::Store]));
+    assert!(ops.windows(5).any(|w| w[0] == O::Jz && w[1] == O::PushVar && w[3] == O::Land && w[4] == O::Jmp));
+    assert!(ops.windows(6).any(|w| w[0] == O::Jz && w[2] == O::Jmp && w[3] == O::PushVar && w[5] == O::Lor));
     // try / on exit / case patterns
     let o = ok("start { try { halt; } catch { halt; } on exit { halt; } case 1 { when 1 { halt; } } }");
     let ops: Vec<O> = decode_all(&o.file.tun.code, Width::W4).unwrap().iter().map(|i| i.op).collect();

@@ -1,6 +1,5 @@
 //! Permission-gated file access. Every path is canonicalized (`..` and symlinks resolved; for a
 //! not-yet-existing file its parent is canonicalized) and must lie under a NEED root.
-// TODO(v2): additionally require the NEED root to be present in the signed permission table.
 use super::ops::OOB;
 use super::{Fault, R};
 use crate::{ExecError, EXIT_PERM_DENIED};

@@ -15,7 +15,7 @@ use tunpak_format::dict::{Dict, Entry};
 use tunpak_format::layout::PAK_HEADER_LEN;
 use tunpak_format::pak::PakHeader;
 use tunpak_format::tun::TunFile;
-use tunpak_format::types::{Arch, EntryType, Platform};
+use tunpak_format::types::{Arch, EntryType, KeyMode, Platform, GFLAG_DEBUG, GFLAG_REQUIRE_ONLINE};
 use tunpak_format::tzst::TzstFile;
 
 /// Highest format/executor generation this build understands.
@@ -65,6 +65,21 @@ impl<'a> Pak<'a> {
                 ob!(": update executor")
             )));
         }
+        if hdr.version > EXECUTOR_VERSION || h.version > EXECUTOR_VERSION {
+            return Err(bad(format!(
+                "{}{}{}{}{}",
+                ob!("pak format version "),
+                hdr.version.max(h.version),
+                ob!(" is newer than this executor supports ("),
+                EXECUTOR_VERSION,
+                ob!("): update executor")
+            )));
+        }
+        // SPEC-GAP: spec/01 gflags bit0 only says "require_online". Chosen meaning: refuse unless the pak is
+        // key_mode 2 with a server_url, so the key (and a license check) always comes from the server.
+        if h.gflags & GFLAG_REQUIRE_ONLINE != 0 && !(h.key_mode == KeyMode::Server && trust.server_url.is_some()) {
+            return Err(bad(ob!("pak requires an online key server (key_mode 2 with a server_url), which this executor lacks")));
+        }
         let mut main_idx = None;
         let mut refs = HashSet::new();
         for (i, e) in dict.entries.iter().enumerate() {
@@ -81,6 +96,13 @@ impl<'a> Pak<'a> {
         }
         let main_idx = main_idx.ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, "pak has no main.tun entry"))?;
         Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default() })
+    }
+
+    /// gflags bit1 (debug): verbose errors for this pak.
+    // SPEC-GAP: spec only says "debug". Chosen: verbose errors only (`Env.dev` is read solely by the VM's
+    // `describe`); it never sets `RunOptions.dev`, so prompts, permissions and signature checks are unchanged.
+    pub fn debug(&self) -> bool {
+        self.dict.header.gflags & GFLAG_DEBUG != 0
     }
 
     pub fn entry(&self, r: u64) -> Option<&Entry> {
@@ -115,6 +137,12 @@ impl<'a> Pak<'a> {
         let e = &self.dict.entries[self.main_idx];
         let data = self.data(e)?;
         let (tun, _) = TunFile::parse(&data).map_err(|err| bad(format!("bad main.tun: {err}")))?;
+        if tun.header.version > EXECUTOR_VERSION {
+            return Err(bad(ob!("main.tun version is newer than this executor supports: update executor")));
+        }
+        if tun.header.reserved != 0 {
+            return Err(bad(ob!("bad main.tun: reserved header byte must be 0")));
+        }
         if tun.header.width != self.dict.header.width {
             return Err(bad("inconsistent pak: width mismatch"));
         }
@@ -205,5 +233,84 @@ impl<'a> Services<'a> {
     pub fn lib(&self, import: &str) -> Result<Rc<lib_load::LoadedLib>, String> {
         let e = self.pak.find_stem(import, EntryType::Lib).ok_or_else(|| format!("import '{import}': pak has no such lib"))?;
         self.lib_entry(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tunpak_format::dict::{DictHeader, PermissionTable};
+    use tunpak_format::pak::append_signature;
+    use tunpak_format::tun::{TunFile, TunHeader};
+    use tunpak_format::types::Width;
+
+    /// Unsigned minimal pak (main.tun only); `f` tweaks the headers.
+    fn pak(f: impl Fn(&mut DictHeader, &mut PakHeader, &mut TunHeader)) -> Vec<u8> {
+        let mut ph = PakHeader { version: 1, dict_offset: 0 };
+        let mut th = TunHeader::new(Width::W4);
+        let mut dh = DictHeader {
+            version: 1, app_id: 1, pak_version: 1, min_exec_ver: 1, key_mode: KeyMode::None, build_time: 0,
+            author_id: 1, pubkey_id: 0, gflags: 0, width: Width::W4,
+        };
+        f(&mut dh, &mut ph, &mut th);
+        let mut tb = vec![];
+        TunFile { header: th, consts: vec![], code: vec![0, 3] }.serialize(&mut tb).unwrap();
+        ph.dict_offset = (PAK_HEADER_LEN + tb.len()) as u32;
+        let e = Entry {
+            ref_id: 1, entry_type: EntryType::Tun, flags: 0, arch: Arch::Any, platform: Platform::Any,
+            offset: PAK_HEADER_LEN as u32, size: tb.len() as u32, orig_size: tb.len() as u32, nonce: [0; 12],
+            hash: tunpak_crypto::hash::sha256(&tb), path: "main.tun".into(),
+        };
+        let mut out = vec![];
+        ph.serialize(&mut out).unwrap();
+        out.extend_from_slice(&tb);
+        Dict { header: dh, entries: vec![e], perms: PermissionTable { perms: vec![] } }.serialize(&mut out).unwrap();
+        append_signature(&mut out, &[]).unwrap();
+        out
+    }
+    fn run(p: &[u8], trust: Trust) -> Result<i32, ExecError> {
+        let o = RunOptions { dev: true, trust: Some(trust), ..Default::default() };
+        crate::run_pak_bytes(p, &o)
+    }
+
+    #[test]
+    fn newer_versions_refused_older_ok() {
+        assert_eq!(run(&pak(|_, _, _| {}), Trust::default()), Ok(0));
+        for p in [
+            pak(|_, p, _| p.version = 2),
+            pak(|d, _, _| d.version = 2),
+            pak(|_, _, t| t.version = 2),
+        ] {
+            assert!(run(&p, Trust::default()).unwrap_err().msg.contains("update executor"));
+        }
+        assert_eq!(run(&pak(|_, p, _| p.version = 0), Trust::default()), Ok(0));
+    }
+
+    #[test]
+    fn tun_reserved_must_be_zero() {
+        let e = run(&pak(|_, _, t| t.reserved = 1), Trust::default()).unwrap_err();
+        assert!(e.msg.contains("reserved"), "{e}");
+    }
+
+    #[test]
+    fn require_online_needs_key_server() {
+        let p = pak(|d, _, _| d.gflags = GFLAG_REQUIRE_ONLINE);
+        assert!(run(&p, Trust::default()).unwrap_err().msg.contains("online key server"));
+        let p2 = pak(|d, _, _| {
+            d.gflags = GFLAG_REQUIRE_ONLINE;
+            d.key_mode = KeyMode::Server;
+        });
+        let t = Trust { key_mode: 2, server_url: Some("http://x".into()), ..Default::default() };
+        assert_eq!(run(&p2, t.clone()), Ok(0));
+        assert!(run(&p2, Trust { server_url: None, ..t }).is_err());
+    }
+
+    #[test]
+    fn debug_flag_exposed() {
+        let p = pak(|d, _, _| d.gflags = GFLAG_DEBUG);
+        let (h, _) = PakHeader::parse(&p).unwrap();
+        let (dict, _) = Dict::parse(&p[h.dict_offset as usize..]).unwrap();
+        let pk = Pak { signed: &p, dict, main_idx: 0, trust: Trust::default(), license: None, keys: Default::default() };
+        assert!(pk.debug());
     }
 }

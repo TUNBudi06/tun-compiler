@@ -18,7 +18,7 @@ const USAGE: &str = "usage (distributor first run, in order):
      targets: x64-linux, arm64-linux, x64-termux, arm64-termux
 other commands:
   tunpak build <dir> -o <out.pak> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
-               [--compress] [--width 4|8] [--pak-version N (default 1)] [--unsigned]
+               [--compress] [--require-online] [--width 4|8] [--pak-version N (default 1)] [--unsigned]
                (without --identity, an identity.tzid next to this tunpak binary is used)
   tunpak inspect <x.pak>
   tunpak lib-check <lib.so>
@@ -182,6 +182,7 @@ fn build(args: &[String]) -> Result<(), BuildError> {
             "--encrypt" => encrypt = true,
             "--server-config" => server_config = Some(v("--server-config")?),
             "--compress" => o.compress = true,
+            "--require-online" => o.require_online = true,
             "--unsigned" => unsigned = true,
             "--pak-version" => o.pak_version = v("--pak-version")?.parse().map_err(|_| BuildError::Msg("--pak-version must be a number".into()))?,
             "--width" => {

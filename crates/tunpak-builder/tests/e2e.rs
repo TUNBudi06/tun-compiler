@@ -484,6 +484,31 @@ print "after";"#,
         golden("let @a = [1, 2, 3, 4]; let @s = @a[1:3]; let @n = len(@s); print @n; let @f = @s[0]; print @f;", "2\n2\n");
     }
     #[test]
+    fn slice_start_evaluated_once() {
+        golden_src(
+            "fn f() -> (@r) { print \"c\"; return 1; }\nstart { let @l = [1, 2, 3, 4]; let @s = @l[f():3]; print len(@s); }\n",
+            "c\n2\n",
+            0,
+        );
+    }
+    #[test]
+    fn and_or_yield_int_0_1() {
+        // (expr, expected) for str/int/array operands, short-circuit and not
+        let cases = [
+            ("\"\" and 1", "0"), ("\"hi\" and 1", "1"), ("\"hi\" and \"\"", "0"), ("[1] and 5", "1"), ("[] and 5", "0"),
+            ("\"hi\" or 0", "1"), ("\"\" or 0", "0"), ("\"\" or \"x\"", "1"), ("0 or [1]", "1"), ("0 or []", "0"), ("7 and 9", "1"),
+        ];
+        for (e, want) in cases {
+            golden(&format!("let @r = {e}; print typeof(@r); print @r;"), &format!("int\n{want}\n"));
+        }
+    }
+    #[test]
+    fn and_or_skip_right_side() {
+        let f = "fn f() -> (@r) { print \"called\"; return 1; }\n";
+        golden_src(&format!("{f}start {{ let @a = 0 and f(); let @b = 1 or f(); print @a; print @b; }}\n"), "0\n1\n", 0);
+        golden_src(&format!("{f}start {{ let @a = 1 and f(); let @b = 0 or f(); print @a; print @b; }}\n"), "called\ncalled\n1\n1\n", 0);
+    }
+    #[test]
     fn edge_arr_out_of_range() {
         fails("let @a = [1]; let @x = @a[5];");
     }
@@ -503,7 +528,8 @@ print "after";"#,
     }
     #[test]
     fn edge_align_negative() {
-        compile_err("let @p = 5; align @p -1;");
+        let e = compile_err("let @p = 5; align @p (-1);");
+        assert!(e.to_string().contains("must be >= 1"), "{e}");
     }
     #[test]
     fn edge_padding_needs_three_args() {

@@ -88,11 +88,20 @@ pub fn spawn(p: &Prepared, piped_stdout: bool) -> Result<ChildGuard, ExecError> 
     loop {
         let mut c = Command::new(&p.exe);
         c.args(&p.argv);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            // The child must not outlive a killed executor.
+            c.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
         if piped_stdout {
             c.stdout(Stdio::piped());
         }
         match c.spawn() {
-            Ok(c) => return Ok(ChildGuard(c)),
+            Ok(c) => return Ok(ChildGuard::new(c)),
             // ETXTBSY: another thread's fork briefly inherited our write fd; retry.
             Err(x) if x.raw_os_error() == Some(26) && tries < 50 => {
                 tries += 1;

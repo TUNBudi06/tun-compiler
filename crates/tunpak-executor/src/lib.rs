@@ -173,7 +173,7 @@ fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io)
             .ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, format!("pak has no tzst entry '{path}'")))?;
         let unit = svc.script_entry(e).map_err(|m| ExecError::new(EXIT_ERROR, m))?;
         let env = vm::interp::Env {
-            dev: opts.dev,
+            dev: opts.dev || pak.debug(),
             args: opts.args.clone(),
             tmp: sb.dir().to_path_buf(),
             ver: pak.dict.header.pak_version as i64,

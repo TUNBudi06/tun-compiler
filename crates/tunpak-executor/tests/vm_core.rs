@@ -121,6 +121,17 @@ fn short_circuit_patterns() {
 }
 
 #[test]
+fn land_lor_yield_int_0_1() {
+    let r = prog(|a| {
+        a.push(I(5)).push(I(7)).op(O::Land, &[]).store(0).op(O::Typeof, &[va(0)]).print_top();
+        a.push(I(5)).push(I(7)).op(O::Land, &[]).print_top();
+        a.push(I(0)).push(I(7)).op(O::Lor, &[]).print_top();
+        a.push(I(0)).push(I(0)).op(O::Lor, &[]).print_top();
+    });
+    assert_eq!((r.out.as_str(), r.code()), ("int\n1\n1\n0\n", 0), "{}", r.err);
+}
+
+#[test]
 fn stack_ops() {
     let r = prog(|a| {
         a.push(I(1)).push(I(2)).op(O::Swap, &[]).print_top().print_top_pop();

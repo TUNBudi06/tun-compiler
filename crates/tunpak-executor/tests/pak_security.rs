@@ -647,3 +647,46 @@ fn trust_default_is_empty_and_compiled_matches_constants() {
 
 #[allow(unused)]
 fn unused(_: Src) {}
+
+// ---------------- gflags debug: verbosity only ----------------
+
+/// Set gflags bit1 (debug) in a built pak and re-sign it.
+fn with_debug(pak: &[u8], k: &Keys) -> Vec<u8> {
+    let signed = split_signature(pak).unwrap().signed;
+    let dict_off = u32::from_le_bytes(signed[5..9].try_into().unwrap()) as usize;
+    let mut b = signed.to_vec();
+    b[dict_off + tunpak_format::layout::DICT_OFF_GFLAGS] |= 2;
+    resign(&b, &k.sk)
+}
+
+#[test]
+fn debug_flag_gives_verbose_errors_but_keeps_permission_prompt() {
+    use common::{Asm, O as Op};
+    let k = keys();
+    let opts = base_opts(trust_for(&k, 1, None));
+    // verbose: recursive script fails; the call stack only shows with the debug flag
+    let mut a = Asm::new();
+    a.op(Op::CallFn, &[common::u16a(0), common::u(0)]).halt();
+    a.func("f", 0).op(Op::CallFn, &[common::u16a(0), common::u(0)]).op(Op::Ret, &[common::ss()]);
+    let ents = vec![Ent::tzst(1, "scripts/main.tzst", &a.build())];
+    let plain = build(exit7(), ents, &signed(&k));
+    let r = run_entry(&plain, "scripts/main.tzst", &opts, "");
+    assert!(r.err.contains("max recursion depth") && !r.err.contains("call stack:"), "{}", r.err);
+    let r = run_entry(&with_debug(&plain, &k), "scripts/main.tzst", &opts, "");
+    assert!(r.err.contains("call stack:"), "{}", r.err);
+    // enforcement: a debug pak still prompts for its manifest and is refused on "n"
+    let out = tmpdir("dbg").join("o");
+    let (cfg, pents) = perm_cfg(&k, &out);
+    let dbg = with_debug(&build(run_main(1), pents, &cfg), &k);
+    let r = run(&dbg, &opts, "n\n");
+    assert_eq!(r.res, Ok(126));
+    assert!(r.out.contains("Allow? [y/N]") && !out.exists());
+    // and an unsigned debug pak is still refused by a non-dev executor
+    let unsigned = build(exit7(), vec![], &Cfg::default());
+    let signed_region = split_signature(&unsigned).unwrap().signed.to_vec();
+    let mut b = signed_region.clone();
+    let off = u32::from_le_bytes(b[5..9].try_into().unwrap()) as usize;
+    b[off + tunpak_format::layout::DICT_OFF_GFLAGS] |= 2;
+    tunpak_format::pak::append_signature(&mut b, &[]).unwrap();
+    assert!(run(&b, &opts, "").err_msg().contains("unsigned pak refused"));
+}

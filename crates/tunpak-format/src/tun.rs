@@ -42,6 +42,8 @@ impl TunHeader {
     }
 }
 
+// SPEC-GAP: spec/07 writes PRINT const sources as `80 02` / `80 05` (two bytes), while spec/02
+// defines the source as `0x80|i` in ONE byte. The code (operands) follows spec/02.
 // SPEC-GAP: the spec shows only the str tag (0x02, from `02 02 68 69`). The int tag is not
 // shown; 0x01 chosen to match the ret_type numbering (1=int 2=str).
 pub const CONST_TAG_INT: u8 = 0x01;

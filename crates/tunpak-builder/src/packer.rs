@@ -58,6 +58,8 @@ pub struct PackOptions {
     pub build_time: Option<u64>,
     pub width: Width,
     pub dev: bool,
+    /// gflags bit0: executor refuses unless it can fetch the key from a key server.
+    pub require_online: bool,
     /// Sign with this key (its app_id/author_id/pubkey_id override the fields above). None = unsigned.
     pub sign: Option<SignKey>,
     /// Encrypt every entry (key_mode 1, key = HKDF(master, app_id)).
@@ -68,7 +70,7 @@ pub struct PackOptions {
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { app_id: 0, author_id: 0, pak_version: 0, key_mode: KeyMode::None, build_time: None, width: Width::W4, dev: false, sign: None, master_key: None, compress: false }
+        PackOptions { app_id: 0, author_id: 0, pak_version: 0, key_mode: KeyMode::None, build_time: None, width: Width::W4, dev: false, require_online: false, sign: None, master_key: None, compress: false }
     }
 }
 
@@ -430,7 +432,7 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
             build_time,
             author_id,
             pubkey_id,
-            gflags: if opts.dev { GFLAG_DEBUG } else { 0 },
+            gflags: (if opts.dev { GFLAG_DEBUG } else { 0 }) | (if opts.require_online { GFLAG_REQUIRE_ONLINE } else { 0 }),
             width: opts.width,
         },
         entries,
@@ -629,6 +631,17 @@ mod tests {
         }
         assert_eq!(next, h.dict_offset as usize);
         assert!(matches!(&dict.perms.perms[1], Perm::Run(x) if x.path == "run/hello"));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn require_online_flag() {
+        let d = module("online");
+        let o = PackOptions { build_time: Some(1), require_online: true, ..Default::default() };
+        let pak = pack_with(&d, &o, &hooks_with(fake)).unwrap();
+        let (h, _) = PakHeader::parse(&pak).unwrap();
+        let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
+        assert_eq!(dict.header.gflags, GFLAG_REQUIRE_ONLINE);
         fs::remove_dir_all(d).unwrap();
     }
 
