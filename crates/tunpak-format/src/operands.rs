@@ -24,6 +24,7 @@
 //! | DUP / SWAP / POP | | as named |
 //! | PUSH_VAR | @v | push @v (unset var → runtime error) |
 //! | PUSH_CONST | cref | push const |
+//! | PUSH_BUILTIN | id:1B | push builtin value (ids: opcodes::BUILTINS) |
 //! | GT LT EQ NE GE LE | | pop b, pop a, push int 1/0 (rules: spec/05 "Type system") |
 //! | LNOT | @v | push !truthy(@v) |
 //! | LAND / LOR | | pop b, pop a, push int 1/0. Short-circuit is done by the compiler: `a; DUP; JZ L; b; LAND; L:` and `a; DUP; JZ R; JMP L; R: b; LOR; L:` — JZ pops the DUP'd copy, so at L the stack holds one value whose truthiness is the result |
@@ -174,6 +175,7 @@ pub fn operands(op: Opcode) -> &'static [Kind] {
         O::Store | O::PushVar => &[Var],
         O::Dup | O::Swap | O::Pop => &[],
         O::PushConst => &[CRef],
+        O::PushBuiltin => &[U8],
         O::Gt | O::Lt | O::Eq | O::Ne | O::Ge | O::Le => &[],
         O::Lnot => &[Var],
         O::Land | O::Lor | O::Neg | O::Not => &[],

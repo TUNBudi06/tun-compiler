@@ -66,7 +66,7 @@ fn make_pak(code: Vec<u8>, consts: Vec<Const>, entries: Vec<E>, perms: Vec<Perm>
 }
 
 fn dev() -> RunOptions {
-    RunOptions { dev: true, args: vec![] }
+    RunOptions { dev: true, ..Default::default() }
 }
 fn s(x: &str) -> Const {
     Const::Str(x.into())
@@ -235,7 +235,7 @@ fn arg_pak(flags: u8) -> Vec<u8> {
     make_pak(code, vec![s("input"), s("the input"), s("x"), s("v")], vec![], vec![])
 }
 fn args(a: &[&str]) -> RunOptions {
-    RunOptions { dev: true, args: a.iter().map(|x| x.to_string()).collect() }
+    RunOptions { dev: true, args: a.iter().map(|x| x.to_string()).collect(), ..Default::default() }
 }
 
 #[test]
@@ -316,4 +316,135 @@ fn fuzz_no_panic() {
         v[i] ^= 0xFF;
         let _ = run_pak_bytes(&v, &dev());
     }
+}
+
+// ---------------- v1: shared VM ----------------
+
+use tunpak_format::opcodes::Opcode;
+use tunpak_format::operands::{encode, Arg, Src};
+use tunpak_format::tzst::TzstFile;
+
+fn tzst_bytes(w: Width, consts: Vec<Const>, insns: &[(Opcode, Vec<Arg>)]) -> Vec<u8> {
+    let mut code = vec![];
+    for (o, a) in insns {
+        encode(*o, a, w, &mut code).unwrap();
+    }
+    let f = TzstFile { tun: TunFile { header: TunHeader::new(w), consts, code }, fns: vec![], imports: vec![] };
+    let mut b = vec![];
+    f.serialize(&mut b).unwrap();
+    b
+}
+
+fn tzst_entry(id: u16, data: Vec<u8>) -> E {
+    E { id, ty: EntryType::Tzst, flags: 0, path: "scripts/x.tzst", data }
+}
+
+fn run_io(pak: &[u8]) -> (Result<i32, ExecError>, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut inp = std::io::Cursor::new(Vec::new());
+    let r = run_pak_bytes_io(pak, &dev(), &mut Io { out: &mut out, err: &mut err, input: &mut inp });
+    (r, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned())
+}
+
+/// RUN <tzst 8>; EXIT 5 "end"
+fn run_then_exit(entry: E) -> Vec<u8> {
+    let mut code = vec![];
+    op(&mut code, 0x12, &r4(8));
+    op(&mut code, 6, &[5, 0]);
+    make_pak(code, vec![s("end")], vec![entry], vec![])
+}
+
+#[test]
+fn run_tzst_entry_output_goes_through_io_and_launcher_continues() {
+    let t = tzst_bytes(
+        Width::W4,
+        vec![s("hi from tzst")],
+        &[(Opcode::Print, vec![Arg::Parts(vec![Src::Const(0)])]), (Opcode::Halt, vec![])],
+    );
+    let (r, out, err) = run_io(&run_then_exit(tzst_entry(8, t)));
+    assert_eq!((r, out.as_str(), err.as_str()), (Ok(5), "hi from tzst\n", "end\n"));
+}
+
+#[test]
+fn run_tzst_nonzero_exit_stops_launcher_with_that_code() {
+    let t = tzst_bytes(Width::W4, vec![s("bad")], &[(Opcode::Exit, vec![Arg::U8(4), Arg::CRef(0)])]);
+    let (r, out, err) = run_io(&run_then_exit(tzst_entry(8, t)));
+    assert_eq!((r, out.as_str(), err.as_str()), (Ok(4), "", "bad\n"), "launcher EXIT 5 must not run");
+}
+
+#[test]
+fn run_tzst_runtime_error_stops_launcher_with_exit_1() {
+    let t = tzst_bytes(
+        Width::W4,
+        vec![Const::Int(1), Const::Int(0)],
+        &[
+            (Opcode::PushConst, vec![Arg::CRef(0)]),
+            (Opcode::PushConst, vec![Arg::CRef(1)]),
+            (Opcode::Div, vec![]),
+        ],
+    );
+    let (r, out, err) = run_io(&run_then_exit(tzst_entry(8, t)));
+    assert_eq!((r, out.as_str()), (Ok(1), ""));
+    assert!(err.contains("division by zero"), "{err}");
+}
+
+#[test]
+fn run_tzst_width_mismatch_is_an_error() {
+    let t = tzst_bytes(Width::W8, vec![], &[(Opcode::Halt, vec![])]);
+    let (r, _, _) = run_io(&run_then_exit(tzst_entry(8, t)));
+    assert!(r.unwrap_err().msg.contains("width"));
+}
+
+#[test]
+fn run_tzst_garbage_entry_is_an_error() {
+    let (r, _, _) = run_io(&run_then_exit(tzst_entry(8, vec![1, 2, 3])));
+    assert_eq!(r.unwrap_err().code, EXIT_ERROR);
+}
+
+#[test]
+fn run_tzst_shares_need_roots_with_launcher_state() {
+    // the nested script registers a NEED; its permission state flows back (shared Env)
+    let t = tzst_bytes(
+        Width::W4,
+        vec![s("/tmp")],
+        &[(Opcode::Need, vec![Arg::U8(1), Arg::CRef(0)]), (Opcode::Halt, vec![])],
+    );
+    let (r, _, _) = run_io(&run_then_exit(tzst_entry(8, t)));
+    assert_eq!(r, Ok(5));
+}
+
+#[test]
+fn push_builtin_in_launcher() {
+    // PUSH_BUILTIN $OS; PUSH_CONST "linux"; EQ; JZ end; EXIT 5; end: HALT
+    let mut code = vec![];
+    op(&mut code, 0x36, &[1]);
+    op(&mut code, 0x41, &[0]);
+    op(&mut code, 0x44, &[]);
+    let j = code.len();
+    op(&mut code, 0x50, &[0, 0, 0, 0]);
+    op(&mut code, 6, &[5, 1]);
+    let end = code.len() as u32;
+    code[j + 2..j + 6].copy_from_slice(&end.to_le_bytes());
+    op(&mut code, 3, &[]);
+    let pak = make_pak(code, vec![s("linux"), s("x")], vec![], vec![]);
+    assert_eq!(run_pak_bytes(&pak, &dev()), Ok(5));
+    let pak = make_pak(vec![0, 0x36, 99], vec![], vec![], vec![]);
+    assert!(run_pak_bytes(&pak, &dev()).unwrap_err().msg.contains("unknown builtin"));
+}
+
+#[test]
+fn launcher_print_goes_through_io() {
+    let mut code = vec![];
+    op(&mut code, 4, &[0, 0]); // SET @0 = "hi"
+    op(&mut code, 5, &[2, 0x80, 0x00, 0x00]); // PRINT_TUN: const#0, @0
+    op(&mut code, 3, &[]);
+    let (r, out, _) = run_io(&make_pak(code, vec![s("hi")], vec![], vec![]));
+    assert_eq!((r, out.as_str()), (Ok(0), "hihi\n"));
+}
+
+#[test]
+fn launcher_rejects_tzst_only_opcodes() {
+    // ADD is a valid instruction but not part of the launcher set
+    let pak = make_pak(vec![0, 0x58], vec![], vec![], vec![]);
+    assert!(run_pak_bytes(&pak, &dev()).unwrap_err().msg.contains("not valid in main.tun"));
 }

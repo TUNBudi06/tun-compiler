@@ -1,13 +1,18 @@
 //! Shared compiler: `.tun` / `.tzst` text → bytecode (spec/04-language.md, spec/02-opcodes.md).
-//! v0 covers main.tun only (START/LOAD/MAIN, no if/loop). `.tzst` arrives in v1.
+//! main.tun (START/LOAD/MAIN + `if`) and `.tzst` (v1: everything except imports/lib calls).
 
 use tunpak_format::dict::Perm;
 use tunpak_format::tun::{Const, TunFile};
 use tunpak_format::types::Width;
 
+pub mod checker;
+pub mod codegen;
 pub mod disasm;
 pub mod errors;
 pub mod lexer;
+pub mod parser;
+#[cfg(test)]
+mod tests;
 pub mod tun;
 pub mod tzst;
 

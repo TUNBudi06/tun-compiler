@@ -1,218 +1,1118 @@
-//! Launcher VM for main.tun. Every operand read is bounds-checked: a truncated or illegal
-//! instruction is an `ExecError`, never a panic.
-use super::vars::{Value, Vars};
+//! The VM: one interpreter for the main.tun launcher and for .tzst scripts.
+//!
+//! Decoding is done once (see `program.rs`); this file only executes. A `Vm` is either a
+//! *launcher* (has a `Launcher`: pak, sandbox, ARG/LOAD/RUN/... enabled, only the v0 opcode set
+//! allowed, errors become `Err(ExecError)`) or a *script* (`run_script`: errors are printed to
+//! `io.err` and become an exit code; TRY/ON_EXIT/limits apply).
+//!
+//! Memory accounting (approximate, documented on purpose): every value *created* by an op is
+//! charged `len` bytes (str/buf) or 16 bytes per element (arr/object/tuple). A single value above
+//! the limit fails at once with `out of memory`; otherwise the charges accumulate and, every
+//! limit/16 bytes (min 64 KB), the live size of all frames is re-measured (shared containers
+//! counted once) and compared against the limit. Freed values therefore stop counting at the
+//! next re-measure; nothing is tracked per allocation.
+use super::frame::{Frame, LoopState};
+use super::fsio::{self, Access, Perms};
+use super::ops::{self, int_of, slice_at, str_of, OOB};
+use super::program::*;
+use super::stack::Handler;
+use super::vars::*;
+use super::{Fault, R};
 use crate::loader::{run_exec, Pak};
 use crate::platform::linux as plat;
 use crate::sandbox::Sandbox;
-use crate::{ExecError, RunOptions, EXIT_ERROR, EXIT_MISUSE, EXIT_NOT_FOUND};
-use tunpak_format::opcodes::{builtin_name, Opcode, SRC_BUILTIN, SRC_STACK, SRC_USER_VAR};
-use tunpak_format::tun::{Const, TunFile};
-use tunpak_format::varint;
+use crate::{ExecError, Io, RunOptions, EXIT_ERROR, EXIT_MISUSE, EXIT_NOT_FOUND};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tunpak_format::opcodes::{builtin_name, Opcode};
+use tunpak_format::operands::{innermost, Insn, Src};
+use tunpak_format::tzst::TzstFile;
+use tunpak_format::types::{EntryType, PermKind};
 
-const STACK_MAX: usize = 4096;
+const MAX_CALL_DEPTH: usize = 256;
+const MAX_HANDLERS: usize = 4096;
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_MEM: u64 = 256 << 20;
+const DEFAULT_ON_EXIT_MS: u64 = 5_000;
 
-fn err(msg: impl Into<String>) -> ExecError {
-    ExecError::new(EXIT_ERROR, msg)
+fn oom() -> Fault {
+    Fault::Rt("out of memory".into())
+}
+fn fatal(code: i32, m: impl Into<String>) -> Fault {
+    Fault::Fatal(ExecError::new(code, m))
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Src {
-    Var(u8),
-    Builtin(u8),
-    Const(usize),
-    Stack,
-}
-
-#[derive(Debug)]
-enum Insn {
-    Nop,
-    Halt,
-    Set(u8, u64),
-    Print(Vec<Src>),
-    Exit(u8, u64),
-    Arg { var: u8, name: u64, flags: u8, desc: u64 },
-    Load(u64),
-    LoadSrv,
-    Run(u64),
-    Perm(u8),
-    Verify(u64),
-    PushVar(u8),
-    PushConst(u64),
-    Cmp(Opcode),
-    Jz(usize),
-    Jmp(usize),
-}
-
-struct Cur<'a> {
-    b: &'a [u8],
-    pos: usize,
-}
-impl Cur<'_> {
-    fn u8(&mut self) -> Result<u8, ExecError> {
-        let v = *self.b.get(self.pos).ok_or_else(|| err("truncated instruction"))?;
-        self.pos += 1;
-        Ok(v)
-    }
-    fn src_const(&mut self, marker: u8) -> Result<usize, ExecError> {
-        if marker == tunpak_format::opcodes::SRC_CONST_ESCAPE {
-            Ok(self.varint()? as usize)
-        } else {
-            Ok((marker & 0x7F) as usize)
-        }
-    }
-    fn varint(&mut self) -> Result<u64, ExecError> {
-        let (v, n) = varint::decode(&self.b[self.pos..]).map_err(|_| err("truncated instruction (const ref)"))?;
-        self.pos += n;
-        Ok(v)
-    }
-    fn u32le(&mut self) -> Result<u32, ExecError> {
-        let s = self.b.get(self.pos..self.pos + 4).ok_or_else(|| err("truncated instruction (jump addr)"))?;
-        self.pos += 4;
-        Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-}
-
-fn decode(code: &[u8], pc: usize, width: tunpak_format::types::Width) -> Result<(Insn, usize), ExecError> {
-    let raw = code.get(pc..pc + 2).ok_or_else(|| err("truncated instruction (opcode)"))?;
-    let raw = u16::from_be_bytes([raw[0], raw[1]]);
-    let op = Opcode::try_from(raw).map_err(|_| err(format!("opcode 0x{raw:04X} not valid in main.tun")))?;
-    let mut c = Cur { b: code, pos: pc + 2 };
-    let eref = |c: &mut Cur| -> Result<u64, ExecError> {
-        let (v, n) = width.read(&c.b[c.pos..]).map_err(|_| err("truncated instruction (entry ref)"))?;
-        c.pos += n;
-        Ok(v)
-    };
-    let insn = match op {
-        Opcode::Start | Opcode::Main => Insn::Nop,
-        Opcode::Halt => Insn::Halt,
-        Opcode::Set => Insn::Set(c.u8()?, c.varint()?),
-        Opcode::PrintTun => {
-            let n = c.u8()?;
-            let mut parts = Vec::new();
-            for _ in 0..n {
-                let m = c.u8()?;
-                parts.push(match m {
-                    SRC_USER_VAR => Src::Var(c.u8()?),
-                    SRC_BUILTIN => Src::Builtin(c.u8()?),
-                    SRC_STACK => Src::Stack,
-                    m if m & 0x80 != 0 => Src::Const(c.src_const(m)?),
-                    m => return Err(err(format!("invalid <src> marker 0x{m:02X}"))),
-                });
-            }
-            Insn::Print(parts)
-        }
-        Opcode::Exit => Insn::Exit(c.u8()?, c.varint()?),
-        Opcode::Arg => Insn::Arg { var: c.u8()?, name: c.varint()?, flags: c.u8()?, desc: c.varint()? },
-        Opcode::Load => Insn::Load(eref(&mut c)?),
-        Opcode::LoadSrv => {
-            eref(&mut c)?;
-            c.u8()?;
-            Insn::LoadSrv
-        }
-        Opcode::Run => Insn::Run(eref(&mut c)?),
-        Opcode::Perm => Insn::Perm(c.u8()?),
-        Opcode::Verify => Insn::Verify(eref(&mut c)?),
-        Opcode::PushVar => Insn::PushVar(c.u8()?),
-        Opcode::PushConst => Insn::PushConst(c.varint()?),
-        Opcode::Gt | Opcode::Lt | Opcode::Eq | Opcode::Ne | Opcode::Ge | Opcode::Le => Insn::Cmp(op),
-        // SPEC-GAP: jump addr endianness/base unstated; 4 bytes little-endian, absolute
-        // offset into the code section (offset == code.len() ends the program).
-        Opcode::Jz => Insn::Jz(c.u32le()? as usize),
-        Opcode::Jmp => Insn::Jmp(c.u32le()? as usize),
-        other => return Err(err(format!("opcode {} not valid in main.tun", other.mnemonic()))),
-    };
-    Ok((insn, c.pos))
-}
-
-pub struct Vm<'a> {
-    pak: &'a Pak<'a>,
-    tun: &'a TunFile,
-    opts: &'a RunOptions,
-    sb: &'a Sandbox,
-    vars: Vars,
-    stack: Vec<Value>,
-    /// `$?`: exit code of the last RUN child.
+/// State shared between a launcher and the scripts it runs (builtins + permission roots).
+#[derive(Default)]
+pub struct Env {
+    pub dev: bool,
+    pub args: Vec<String>,
+    pub tmp: PathBuf,
+    pub ver: i64,
+    /// `$?`
     pub last_exit: i32,
-    pub loaded: Vec<u64>,
-    pub perms: Vec<u8>,
+    pub perms: Perms,
 }
 
-impl<'a> Vm<'a> {
-    pub fn new(pak: &'a Pak<'a>, tun: &'a TunFile, opts: &'a RunOptions, sb: &'a Sandbox) -> Self {
-        Vm { pak, tun, opts, sb, vars: Vars::new(), stack: Vec::new(), last_exit: 0, loaded: vec![], perms: vec![] }
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub timeout: Duration,
+    pub mem: u64,
+    pub on_exit: Duration,
+}
 
-    fn konst(&self, i: u64) -> Result<Value, ExecError> {
-        match self.tun.consts.get(usize::try_from(i).unwrap_or(usize::MAX)) {
-            Some(Const::Int(n)) => Ok(Value::Int(*n as i64)),
-            Some(Const::Str(s)) => Ok(Value::Str(s.clone())),
-            None => Err(err(format!("const #{i} out of range"))),
+impl Limits {
+    pub fn from_opts(o: &RunOptions) -> Self {
+        Limits {
+            timeout: Duration::from_millis(o.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+            mem: o.mem_limit.unwrap_or(DEFAULT_MEM),
+            on_exit: Duration::from_millis(o.on_exit_timeout_ms.unwrap_or(DEFAULT_ON_EXIT_MS)),
+        }
+    }
+}
+
+pub struct Launcher<'a> {
+    pub pak: &'a Pak<'a>,
+    pub sb: &'a Sandbox,
+    pub opts: &'a RunOptions,
+    pub loaded: Vec<u64>,
+    pub perm_ids: Vec<u8>,
+}
+
+enum End {
+    Code(i32),
+    Err { code: i32, msg: String },
+}
+
+pub struct Vm<'a, 'io> {
+    prog: &'a Program,
+    io: &'a mut Io<'io>,
+    pub env: Env,
+    limits: Limits,
+    launcher: Option<Launcher<'a>>,
+    cur: Frame,
+    callers: Vec<Frame>,
+    pc: usize,
+    handlers: Vec<Handler>,
+    /// (handler insn index, frame depth that registered it)
+    on_exit: Option<(usize, usize)>,
+    in_handler: bool,
+    big_endian: bool,
+    deadline: Instant,
+    ticks: u32,
+    cur_off: usize,
+    mem_limit: u64,
+    pending: u64,
+}
+
+fn launcher_allows(op: Opcode) -> bool {
+    use Opcode as O;
+    matches!(
+        op,
+        O::Start | O::Main | O::Halt | O::Set | O::PrintTun | O::Exit | O::Arg | O::Load | O::LoadSrv | O::Run
+            | O::Perm | O::Verify | O::PushVar | O::PushConst | O::PushBuiltin | O::Gt | O::Lt | O::Eq | O::Ne
+            | O::Ge | O::Le | O::Jz | O::Jmp | O::Nop
+    )
+}
+
+impl<'a, 'io> Vm<'a, 'io> {
+    fn base(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits, launcher: Option<Launcher<'a>>) -> Self {
+        let mem_limit = limits.mem.max(env.perms.mem.unwrap_or(0));
+        Vm {
+            prog,
+            io,
+            env,
+            limits,
+            launcher,
+            cur: Frame::new(None, 0, prog.code_len),
+            callers: Vec::new(),
+            pc: 0,
+            handlers: Vec::new(),
+            on_exit: None,
+            in_handler: false,
+            big_endian: false,
+            deadline: Instant::now() + limits.timeout,
+            ticks: 0,
+            cur_off: 0,
+            mem_limit,
+            pending: 0,
         }
     }
 
-    fn builtin(&self, id: u8) -> Result<Value, ExecError> {
-        let name = builtin_name(id).ok_or_else(|| err(format!("unknown builtin id {id}")))?;
-        Ok(match name {
-            "$PID" => Value::Int(std::process::id() as i64),
-            "$OS" => Value::Str(plat::os().into()),
-            "$OSV" => Value::Str(plat::osv()),
-            "$ARCH" => Value::Str(plat::arch_name().into()),
-            "$USER" => Value::Str(plat::user()),
-            "$DIR" => Value::Str(plat::cwd()),
-            "$TMP" => Value::Str(self.sb.dir().to_string_lossy().into_owned()),
-            "$ARGS" => Value::Str(self.opts.args.join(" ")),
-            "$VER" => Value::Int(self.pak.dict.header.pak_version as i64),
-            "$TERM_COLOR" => Value::Int(plat::term_color()),
-            "$?" => Value::Int(self.last_exit as i64),
-            // SPEC-GAP: v0 has no device identity or permission prompts; DEVICE/DEVICE_ID are
-            // empty, PERM_CAMERA/MIC are -1 (no permission concept), PERM_PATH_OK is 1.
-            "$DEVICE" | "$DEVICE_ID" => Value::Str(String::new()),
-            "$PERM_CAMERA" | "$PERM_MIC" => Value::Int(-1),
-            "$PERM_PATH_OK" => Value::Int(1),
-            _ => return Err(err(format!("builtin {name} not implemented"))),
-        })
+    pub fn launcher(prog: &'a Program, pak: &'a Pak<'a>, sb: &'a Sandbox, opts: &'a RunOptions, io: &'a mut Io<'io>) -> Self {
+        let env = Env {
+            dev: opts.dev,
+            args: opts.args.clone(),
+            tmp: sb.dir().to_path_buf(),
+            ver: pak.dict.header.pak_version as i64,
+            last_exit: 0,
+            perms: Perms::default(),
+        };
+        let l = Launcher { pak, sb, opts, loaded: vec![], perm_ids: vec![] };
+        Self::base(prog, io, env, Limits::from_opts(opts), Some(l))
     }
 
-    fn pop(&mut self) -> Result<Value, ExecError> {
-        self.stack.pop().ok_or_else(|| err("stack underflow"))
+    pub fn script(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits) -> Self {
+        Self::base(prog, io, env, limits, None)
     }
-    fn push(&mut self, v: Value) -> Result<(), ExecError> {
-        if self.stack.len() >= STACK_MAX {
-            return Err(err("stack overflow"));
+
+    // ---------------- entry points ----------------
+
+    /// Run the launcher; runtime errors become `Err(ExecError)` (v0 behaviour).
+    pub fn run_launcher(&mut self) -> Result<i32, ExecError> {
+        if self.env.args.iter().any(|a| a == "--help") {
+            let u = self.usage().map_err(fault_to_exec)?;
+            let _ = write!(self.io.out, "{u}");
+            return Ok(0);
         }
-        self.stack.push(v);
+        match self.run_steps() {
+            Ok(c) => Ok(c),
+            Err(e) => Err(fault_to_exec(e)),
+        }
+    }
+
+    /// Run a script to its end. Never fails: errors are written to `io.err` and mapped to an exit
+    /// code (1, or 126 for permission violations). ON_EXIT runs afterwards, once.
+    pub fn run_script(&mut self) -> i32 {
+        self.deadline = Instant::now() + self.limits.timeout;
+        let code = match self.run_to_end() {
+            End::Code(c) => c,
+            End::Err { code, msg } => {
+                let _ = writeln!(self.io.err, "error: {msg}");
+                code
+            }
+        };
+        self.run_on_exit();
+        code
+    }
+
+    fn run_to_end(&mut self) -> End {
+        loop {
+            match self.run_steps() {
+                Ok(c) => return End::Code(c),
+                Err(Fault::Rt(m)) => {
+                    if self.unwind() {
+                        continue;
+                    }
+                    return End::Err { code: 1, msg: self.describe(&m) };
+                }
+                Err(Fault::Fatal(e)) => return End::Err { code: e.code, msg: self.describe(&e.msg) },
+            }
+        }
+    }
+
+    fn run_on_exit(&mut self) {
+        let Some((addr_idx, depth)) = self.on_exit.take() else { return };
+        // Reuse the vars of the frame that registered the handler (if it still exists); drop
+        // everything else so a memory blow-up does not starve the handler.
+        let vars = if depth < self.callers.len() {
+            std::mem::take(&mut self.callers[depth].vars)
+        } else if depth == self.callers.len() {
+            std::mem::take(&mut self.cur.vars)
+        } else {
+            Default::default()
+        };
+        self.callers.clear();
+        self.handlers.clear();
+        self.cur = Frame::new(None, 0, self.prog.code_len);
+        self.cur.vars = vars;
+        self.pc = addr_idx;
+        self.in_handler = true;
+        self.pending = 0;
+        self.deadline = Instant::now() + self.limits.on_exit;
+        if let End::Err { msg, .. } = self.run_to_end() {
+            let _ = writeln!(self.io.err, "error in ON_EXIT handler: {msg}");
+        }
+    }
+
+    fn describe(&self, msg: &str) -> String {
+        if !self.env.dev {
+            return msg.to_string();
+        }
+        let name = |f: &Frame| {
+            f.fn_idx.and_then(|i| self.prog.fns.get(i)).map(|f| f.name.clone()).unwrap_or_else(|| "<start>".into())
+        };
+        let stack: Vec<String> = std::iter::once(&self.cur).chain(self.callers.iter().rev()).map(name).collect();
+        format!("{msg}\n  at offset {} in fn '{}'\n  call stack: {}", self.cur_off, name(&self.cur), stack.join(" <- "))
+    }
+
+    /// Unwind to the innermost TRY handler. False if there is none.
+    fn unwind(&mut self) -> bool {
+        let Some(h) = self.handlers.pop() else { return false };
+        while self.callers.len() > h.depth {
+            match self.callers.pop() {
+                Some(f) => self.cur = f,
+                None => break,
+            }
+        }
+        self.cur.stack.truncate(h.stack_h);
+        self.cur.loops.truncate(h.loop_h);
+        let depth = self.callers.len();
+        self.handlers.retain(|x| x.depth <= depth);
+        self.pc = h.addr_idx;
+        true
+    }
+
+    fn run_steps(&mut self) -> R<i32> {
+        loop {
+            if let Some(c) = self.step()? {
+                return Ok(c);
+            }
+        }
+    }
+
+    // ---------------- helpers ----------------
+
+    fn alloc(&mut self, bytes: u64) -> R<()> {
+        if bytes > self.mem_limit {
+            return Err(oom());
+        }
+        self.pending += bytes;
+        if self.pending >= (self.mem_limit / 16).max(64 * 1024) {
+            self.pending = 0;
+            if self.live_size() > self.mem_limit {
+                return Err(oom());
+            }
+        }
         Ok(())
     }
 
-    fn require_entry(&self, r: u64) -> Result<(), ExecError> {
-        self.pak.entry(r).map(|_| ()).ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, format!("entry not found (ref {r})")))
+    fn live_size(&self) -> u64 {
+        let mut seen = HashSet::new();
+        let mut total = 0;
+        for f in self.callers.iter().chain(std::iter::once(&self.cur)) {
+            for v in f.vars.iter().chain(f.stack.iter()) {
+                total += deep_size(v, &mut seen, 0);
+            }
+            for l in &f.loops {
+                if let LoopState::Each { items, .. } = l {
+                    total += items.iter().map(|v| deep_size(v, &mut seen, 0)).sum::<u64>();
+                }
+            }
+        }
+        total
     }
 
-    /// Usage text built from every ARG instruction.
-    fn usage(&self) -> Result<String, ExecError> {
-        let width = self.tun.header.width;
-        let mut s = String::from("usage: <module.pak> [options]\n");
-        let mut pc = 0;
-        while pc < self.tun.code.len() {
-            let (insn, next) = decode(&self.tun.code, pc, width)?;
-            if let Insn::Arg { name, flags, desc, .. } = insn {
-                let n = self.konst(name)?;
-                let n = n.to_string();
-                let n = n.trim_start_matches('-');
-                let val = if flags & 1 != 0 { "" } else { " <value>" };
-                let req = if flags & 2 != 0 { " (required)" } else { "" };
-                s.push_str(&format!("  --{n}{val}  {}{req}\n", self.konst(desc)?));
-            }
-            pc = next;
+    fn pop(&mut self) -> R<Value> {
+        Ok(self.cur.stack.pop()?)
+    }
+    fn push(&mut self, v: Value) -> R<()> {
+        Ok(self.cur.stack.push(v)?)
+    }
+    /// Push a freshly created value (charged to the memory accounting).
+    fn push_new(&mut self, v: Value) -> R<()> {
+        self.alloc(shallow_size(&v))?;
+        self.push(v)
+    }
+    fn set_new(&mut self, i: u8, v: Value) -> R<()> {
+        self.alloc(shallow_size(&v))?;
+        self.cur.vars.set(i, v);
+        Ok(())
+    }
+    fn var(&self, i: u8) -> R<Value> {
+        Ok(self.cur.vars.get(i)?.clone())
+    }
+    fn konst(&self, i: u64) -> R<Value> {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| self.prog.consts.get(i))
+            .cloned()
+            .ok_or_else(|| Fault::Rt(format!("const #{i} out of range")))
+    }
+    fn src(&mut self, s: Src) -> R<Value> {
+        match s {
+            Src::Var(i) => self.var(i),
+            Src::Builtin(id) => self.builtin(id),
+            Src::Const(i) => self.konst(i),
+            Src::Stack => self.pop(),
         }
-        s.push_str("  --help  show this help\n");
+    }
+    fn int_src(&mut self, s: Src, what: &str) -> R<i64> {
+        let v = self.src(s)?;
+        Ok(int_of(&v, what)?)
+    }
+    fn goto(&mut self, addr: usize) -> R<()> {
+        self.pc = self.prog.idx_of(addr).ok_or_else(|| format!("jump to {addr} is not an instruction boundary"))?;
+        Ok(())
+    }
+
+    fn builtin(&self, id: u8) -> R<Value> {
+        let name = builtin_name(id).ok_or_else(|| format!("unknown builtin id {id}"))?;
+        Ok(match name {
+            "$PID" => Value::Int(std::process::id() as i64),
+            "$OS" => Value::str(plat::os()),
+            "$OSV" => Value::str(plat::osv()),
+            "$ARCH" => Value::str(plat::arch_name()),
+            "$USER" => Value::str(plat::user()),
+            "$DIR" => Value::str(plat::cwd()),
+            "$TMP" => Value::str(self.env.tmp.to_string_lossy().into_owned()),
+            "$ARGS" => Value::str(self.env.args.join(" ")),
+            "$VER" => Value::Int(self.env.ver),
+            "$TERM_COLOR" => Value::Int(plat::term_color()),
+            "$?" => Value::Int(self.env.last_exit as i64),
+            // SPEC-GAP: v0 has no device identity or permission prompts; DEVICE/DEVICE_ID are
+            // empty, PERM_CAMERA/MIC are -1 (no permission concept), PERM_PATH_OK is 1.
+            "$DEVICE" | "$DEVICE_ID" => Value::str(""),
+            "$PERM_CAMERA" | "$PERM_MIC" => Value::Int(-1),
+            "$PERM_PATH_OK" => Value::Int(1),
+            _ => return Err(format!("builtin {name} not implemented").into()),
+        })
+    }
+
+    fn read_line(&mut self) -> R<String> {
+        let mut s = String::new();
+        let n = self.io.input.read_line(&mut s).map_err(|e| format!("input error: {e}"))?;
+        if n == 0 {
+            return Err("unexpected end of input".into());
+        }
+        while s.ends_with('\n') || s.ends_with('\r') {
+            s.pop();
+        }
         Ok(s)
     }
 
-    fn arg(&self, name: &str, flag: bool) -> Result<Option<String>, ExecError> {
+    fn say(&mut self, s: &str) -> R<()> {
+        write!(self.io.out, "{s}").map_err(|e| format!("output error: {e}"))?;
+        Ok(())
+    }
+
+    /// Bytes `[off, off+len)` of a buf, or of the file named by a str (permission-gated).
+    fn read_src(&mut self, src: &Value, off: i64, len: i64) -> R<Vec<u8>> {
+        match src {
+            Value::Buf(b) => Ok(slice_at(b, off, len)?.to_vec()),
+            Value::Str(p) => {
+                if off < 0 || len < 0 {
+                    return Err(OOB.into());
+                }
+                let path = self.env.perms.check(p, Access::Read)?;
+                let flen = fsio::file_len(&path, p)?;
+                if (off as u64).checked_add(len as u64).map_or(true, |e| e > flen) {
+                    return Err(OOB.into());
+                }
+                self.alloc(len as u64)?;
+                Ok(fsio::read_range(&path, p, off as u64, len as usize)?)
+            }
+            o => Err(format!("cannot read from {}", o.type_name()).into()),
+        }
+    }
+
+    /// Whole content of a buf or of the file named by a str.
+    fn bytes_of(&mut self, src: &Value) -> R<Vec<u8>> {
+        match src {
+            Value::Buf(b) => Ok(b.to_vec()),
+            Value::Str(p) => {
+                let path = self.env.perms.check(p, Access::Read)?;
+                let n = fsio::file_len(&path, p)?;
+                self.alloc(n)?;
+                Ok(fsio::read_range(&path, p, 0, n as usize)?)
+            }
+            o => Err(format!("cannot read from {}", o.type_name()).into()),
+        }
+    }
+
+    // ---------------- the instruction step ----------------
+
+    fn step(&mut self) -> R<Option<i32>> {
+        let prog = self.prog;
+        let off = prog.insns.get(self.pc).map_or(prog.code_len, |i| i.at);
+        if off >= self.cur.end_off {
+            // fell off the end of the extent
+            return if self.callers.is_empty() {
+                Ok(Some(0))
+            } else {
+                self.do_return(Value::Null)?;
+                Ok(None)
+            };
+        }
+        let Some(insn) = prog.insns.get(self.pc) else { return Ok(Some(0)) };
+        self.cur_off = off;
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks & 1023 == 0 && Instant::now() >= self.deadline {
+            return Err(fatal(EXIT_ERROR, "timeout"));
+        }
+        self.pc += 1;
+        self.exec(insn)
+    }
+
+    fn do_return(&mut self, v: Value) -> R<()> {
+        let Some(caller) = self.callers.pop() else { return Err("RET outside a function".into()) };
+        let done = std::mem::replace(&mut self.cur, caller);
+        self.pc = done.ret_pc;
+        let depth = self.callers.len();
+        self.handlers.retain(|h| h.depth <= depth);
+        self.push(v)
+    }
+
+    fn exec(&mut self, insn: &'a Insn) -> R<Option<i32>> {
+        use Opcode as O;
+        let op = insn.op;
+        match (&self.launcher, op) {
+            (Some(_), _) if !launcher_allows(op) => {
+                return Err(format!("opcode {} not valid in main.tun", op.mnemonic()).into())
+            }
+            (None, O::Arg | O::Load | O::LoadSrv | O::Run | O::Perm | O::Verify) => {
+                return Err(format!("opcode {} not valid in .tzst", op.mnemonic()).into())
+            }
+            _ => {}
+        }
+        match op {
+            O::Start | O::Main | O::Nop | O::Case => {}
+            O::Halt => return Ok(Some(0)),
+            O::Set | O::Let => {
+                let v = self.konst(a_cref(insn, 1))?;
+                self.cur.vars.set(a_var(insn, 0), v);
+            }
+            O::PrintTun | O::Print => {
+                let parts = a_parts(insn);
+                let mut vals = vec![Value::Null; parts.len()];
+                for (i, s) in parts.iter().enumerate().rev() {
+                    vals[i] = self.src(*s)?;
+                }
+                let mut line = String::new();
+                for v in &vals {
+                    line.push_str(&stringify(v));
+                }
+                line.push('\n');
+                self.say(&line)?;
+            }
+            O::Exit => {
+                let code = a_u8(insn, 0);
+                let text = stringify(&self.konst(a_cref(insn, 1))?);
+                let r = if code != 0 { writeln!(self.io.err, "{text}") } else { writeln!(self.io.out, "{text}") };
+                r.map_err(|e| format!("output error: {e}"))?;
+                return Ok(Some(code as i32));
+            }
+            O::Arg => self.op_arg(insn)?,
+            O::Load | O::Verify => {
+                let r = a_cref(insn, 0);
+                self.require_entry(r)?;
+                if op == O::Load {
+                    if let Some(l) = self.launcher.as_mut() {
+                        l.loaded.push(r);
+                    }
+                }
+            }
+            O::LoadSrv => return Err(Fault::Rt("LOAD_SRV not supported in this build".into())), // TODO(v2)
+            O::Perm => {
+                if let Some(l) = self.launcher.as_mut() {
+                    l.perm_ids.push(a_u8(insn, 0));
+                }
+            }
+            O::Run => return self.op_run(a_cref(insn, 0)),
+
+            // ---- data & stack ----
+            O::Mov => {
+                let v = self.var(a_var(insn, 1))?;
+                self.cur.vars.set(a_var(insn, 0), v);
+            }
+            O::Store => {
+                let v = self.pop()?;
+                self.cur.vars.set(a_var(insn, 0), v);
+            }
+            O::Dup => {
+                let v = self.cur.stack.peek()?.clone();
+                self.push(v)?;
+            }
+            O::Swap => self.cur.stack.swap_top()?,
+            O::Pop => {
+                self.pop()?;
+            }
+            O::PushVar => {
+                let v = self.var(a_var(insn, 0))?;
+                self.push(v)?;
+            }
+            O::PushConst => {
+                let v = self.konst(a_cref(insn, 0))?;
+                self.push(v)?;
+            }
+            O::PushBuiltin => {
+                let v = self.builtin(a_u8(insn, 0))?;
+                self.push(v)?;
+            }
+
+            // ---- comparison / logic / arithmetic ----
+            O::Gt | O::Lt | O::Eq | O::Ne | O::Ge | O::Le => {
+                let (b, a) = (self.pop()?, self.pop()?);
+                self.push(Value::bool(ops::compare(op, &a, &b)?))?;
+            }
+            O::Lnot => {
+                let t = self.cur.vars.get(a_var(insn, 0))?.truthy();
+                self.push(Value::bool(!t))?;
+            }
+            O::Land | O::Lor => {
+                let (b, a) = (self.pop()?, self.pop()?);
+                let r = if op == O::Land { a.truthy() && b.truthy() } else { a.truthy() || b.truthy() };
+                self.push(Value::bool(r))?;
+            }
+            O::Neg | O::Not => {
+                let a = self.pop()?;
+                let Value::Int(n) = a else {
+                    return Err(format!("cannot apply {} to {}", op.mnemonic(), a.type_name()).into());
+                };
+                self.push(Value::Int(if op == O::Neg { n.wrapping_neg() } else { !n }))?;
+            }
+            O::Add | O::Sub | O::Mul | O::Div | O::Mod | O::And | O::Or | O::Xor | O::Shl | O::Shr | O::Concat => {
+                let (b, a) = (self.pop()?, self.pop()?);
+                let r = ops::arith(op, a, b)?;
+                self.push_new(r)?;
+            }
+
+            // ---- control flow ----
+            O::Jz | O::While => {
+                if !self.pop()?.truthy() {
+                    self.goto(a_addr(insn, 0))?;
+                }
+            }
+            O::Jmp => self.goto(a_addr(insn, 0))?,
+            O::ForRange | O::ForStep | O::ForEach => self.op_for_start(insn)?,
+            O::ForNext => self.op_for_next(a_addr(insn, 0))?,
+            O::Break | O::Continue => {
+                let r = *innermost(&self.prog.regions, insn.at)
+                    .ok_or_else(|| format!("{} outside a loop", op.mnemonic()))?;
+                if op == O::Break {
+                    if r.is_for {
+                        self.cur.loops.pop();
+                    }
+                    self.goto(r.break_to)?;
+                } else {
+                    self.goto(r.continue_to)?;
+                }
+            }
+            O::When => {
+                let subject = self.pop()?;
+                let c = self.konst(a_cref(insn, 0))?;
+                if !values_equal(&subject, &c) {
+                    self.goto(a_addr(insn, 1))?;
+                }
+            }
+
+            // ---- I/O & string ----
+            O::Input => {
+                let prompt = stringify(&self.konst(a_cref(insn, 1))?);
+                let sep = if prompt.is_empty() || prompt.ends_with(char::is_whitespace) { "" } else { " " };
+                self.say(&format!("{prompt}{sep}"))?;
+                let _ = self.io.out.flush();
+                let line = self.read_line()?;
+                self.set_new(a_var(insn, 0), Value::str(line))?;
+            }
+            O::Len => {
+                let n = match self.cur.vars.get(a_var(insn, 0))? {
+                    Value::Str(s) => s.chars().count(),
+                    Value::Buf(b) => b.len(),
+                    Value::Arr(a) => a.borrow().len(),
+                    Value::Object(o) => o.borrow().len(),
+                    Value::Tuple(t) => t.len(),
+                    o => return Err(format!("cannot take len of {}", o.type_name()).into()),
+                };
+                self.push(Value::Int(n as i64))?;
+            }
+            O::Endian => match a_u8(insn, 0) {
+                0 => self.big_endian = false,
+                1 => self.big_endian = true,
+                n => return Err(format!("ENDIAN must be 0 or 1, got {n}").into()),
+            },
+            O::Typeof => {
+                let t = self.cur.vars.get(a_var(insn, 0))?.type_name();
+                self.push(Value::str(t))?;
+            }
+            O::Cast => {
+                let v = self.var(a_var(insn, 0))?;
+                let r = ops::cast(&v, a_u8(insn, 1))?;
+                self.push_new(r)?;
+            }
+            O::Substr => {
+                let len = self.pop()?;
+                let off = self.pop()?;
+                let s = self.pop()?;
+                let r = ops::substr(str_of(&s, "SUBSTR subject")?, int_of(&off, "SUBSTR offset")?, int_of(&len, "SUBSTR length")?)?;
+                self.push_new(Value::str(r))?;
+            }
+            O::Indexof => {
+                let needle = self.pop()?;
+                let hay = self.pop()?;
+                let n = ops::indexof(str_of(&hay, "INDEXOF subject")?, str_of(&needle, "INDEXOF needle")?);
+                self.push(Value::Int(n))?;
+            }
+            O::Replace => {
+                let to = self.pop()?;
+                let from = self.pop()?;
+                let s = self.pop()?;
+                let (s, from, to) = (str_of(&s, "REPLACE subject")?, str_of(&from, "REPLACE from")?, str_of(&to, "REPLACE to")?);
+                let r = if from.is_empty() { s.to_string() } else { s.replace(from, to) };
+                self.push_new(Value::str(r))?;
+            }
+            O::Split => {
+                let sep = self.src(a_src(insn, 1))?;
+                let s = self.var(a_var(insn, 0))?;
+                let parts = ops::split(str_of(&s, "SPLIT subject")?, str_of(&sep, "SPLIT separator")?);
+                self.push_new(Value::arr(parts))?;
+            }
+            O::Join => {
+                let sep = self.src(a_src(insn, 1))?;
+                let a = self.var(a_var(insn, 0))?;
+                let sep = stringify(&sep);
+                let Value::Arr(a) = a else { return Err(format!("JOIN needs arr, got {}", a.type_name()).into()) };
+                let strs: Vec<String> = a.borrow().iter().map(stringify).collect();
+                self.push_new(Value::str(strs.join(&sep)))?;
+            }
+            O::Trim => {
+                let v = self.var(a_var(insn, 0))?;
+                let r = str_of(&v, "TRIM subject")?.trim().to_string();
+                self.push_new(Value::str(r))?;
+            }
+
+            // ---- typed read / byte ----
+            O::Read | O::ReadStr => {
+                let len = self.int_src(a_src(insn, 3), "size")?;
+                let off = self.int_src(a_src(insn, 2), "offset")?;
+                let src = self.src(a_src(insn, 1))?;
+                let bytes = self.read_src(&src, off, len)?;
+                let v = if op == O::Read {
+                    Value::buf(bytes)
+                } else {
+                    let s = String::from_utf8_lossy(&bytes);
+                    Value::str(s.trim_end_matches('\0'))
+                };
+                self.set_new(a_var(insn, 0), v)?;
+            }
+            O::ReadU8 | O::ReadU16 | O::ReadU32 | O::ReadU64 => {
+                let n = match op {
+                    O::ReadU8 => 1,
+                    O::ReadU16 => 2,
+                    O::ReadU32 => 4,
+                    _ => 8,
+                };
+                let off = self.int_src(a_src(insn, 2), "offset")?;
+                let src = self.src(a_src(insn, 1))?;
+                let bytes = self.read_src(&src, off, n)?;
+                self.cur.vars.set(a_var(insn, 0), Value::Int(ops::bytes_to_int(&bytes, self.big_endian)));
+            }
+            O::Find => {
+                let pat = self.src(a_src(insn, 2))?;
+                let buf = self.src(a_src(insn, 1))?;
+                let pat = match &pat {
+                    Value::Buf(b) => b.to_vec(),
+                    Value::Str(s) => s.as_bytes().to_vec(),
+                    o => return Err(format!("FIND pattern must be buf or str, got {}", o.type_name()).into()),
+                };
+                let hay = match &buf {
+                    Value::Buf(b) => b.clone(),
+                    other => std::rc::Rc::new(self.bytes_of(other)?),
+                };
+                self.cur.vars.set(a_var(insn, 0), Value::Int(ops::find_bytes(&hay, &pat)));
+            }
+            O::Write => self.op_write(insn)?,
+            O::Align => {
+                let n = a_u8(insn, 1) as i128;
+                if n == 0 {
+                    return Err("ALIGN n must be >= 1".into());
+                }
+                let x = int_of(self.cur.vars.get(a_var(insn, 0))?, "ALIGN value")? as i128;
+                let r = (x + n - 1).div_euclid(n) * n;
+                let r = i64::try_from(r).map_err(|_| "ALIGN overflow".to_string())?;
+                self.cur.vars.set(a_var(insn, 0), Value::Int(r));
+            }
+            O::Padding => {
+                let (n, byte) = (a_u8(insn, 1) as usize, a_u8(insn, 2));
+                if n == 0 {
+                    return Err("PADDING n must be >= 1".into());
+                }
+                let Value::Buf(b) = self.var(a_var(insn, 0))? else {
+                    return Err("PADDING needs a buf".into());
+                };
+                let add = (n - b.len() % n) % n;
+                self.alloc((b.len() + add) as u64)?;
+                let mut v = b.to_vec();
+                v.resize(b.len() + add, byte);
+                self.cur.vars.set(a_var(insn, 0), Value::buf(v));
+            }
+            O::HexRange => {
+                let len = self.int_src(a_src(insn, 2), "len")?;
+                let off = self.int_src(a_src(insn, 1), "off")?;
+                let Value::Buf(b) = self.var(a_var(insn, 0))? else { return Err("HEX_RANGE needs a buf".into()) };
+                let h = ops::hex_lower(slice_at(&b, off, len)?);
+                self.push_new(Value::str(h))?;
+            }
+            O::Slice => {
+                let len = self.int_src(a_src(insn, 2), "len")?;
+                let off = self.int_src(a_src(insn, 1), "off")?;
+                let v = self.var(a_var(insn, 0))?;
+                let n = match &v {
+                    Value::Buf(b) => b.len(),
+                    Value::Arr(a) => a.borrow().len(),
+                    Value::Str(s) => s.chars().count(),
+                    o => return Err(format!("cannot slice {}", o.type_name()).into()),
+                };
+                if off < 0 || len < 0 || (off as u64).saturating_add(len as u64) > n as u64 {
+                    return Err("slice out of range".into());
+                }
+                let (o, l) = (off as usize, len as usize);
+                let r = match &v {
+                    Value::Buf(b) => Value::buf(b[o..o + l].to_vec()),
+                    Value::Arr(a) => Value::arr(a.borrow()[o..o + l].to_vec()),
+                    Value::Str(s) => Value::str(s.chars().skip(o).take(l).collect::<String>()),
+                    _ => Value::Null,
+                };
+                self.push_new(r)?;
+            }
+
+            // ---- array ----
+            O::ArrNew => self.cur.vars.set(a_var(insn, 0), Value::arr(vec![])),
+            O::ArrGet | O::ObjGet => {
+                let key = self.pop()?;
+                let v = self.get_index(a_var(insn, 0), key)?;
+                self.push(v)?;
+            }
+            O::ArrLen => {
+                let n = self.arr(a_var(insn, 0))?.borrow().len();
+                self.push(Value::Int(n as i64))?;
+            }
+            O::ArrSet => {
+                // SPEC-GAP: when both `idx` (FF) and the value come from the stack, the compiler
+                // must push value first, then idx (idx is popped first).
+                let key = self.src(a_src(insn, 1))?;
+                let val = self.pop()?;
+                self.set_index(a_var(insn, 0), key, val)?;
+            }
+            O::ObjSet => {
+                let val = self.pop()?;
+                let key = self.pop()?;
+                self.set_index(a_var(insn, 0), key, val)?;
+            }
+            O::ArrPush => {
+                let val = self.pop()?;
+                let a = self.arr(a_var(insn, 0))?;
+                check_store(&val, Value::Arr(a.clone()).container_id())?;
+                self.alloc(16)?;
+                a.borrow_mut().push(val);
+            }
+            O::ArrPop => {
+                let a = self.arr(a_var(insn, 0))?;
+                let v = a.borrow_mut().pop().ok_or("pop from empty array")?;
+                self.push(v)?;
+            }
+            O::Contains => {
+                let item = self.src(a_src(insn, 1))?;
+                let a = self.arr(a_var(insn, 0))?;
+                let found = a.borrow().iter().any(|x| values_equal(x, &item));
+                self.push(Value::bool(found))?;
+            }
+
+            // ---- object ----
+            O::ObjNew => self.cur.vars.set(a_var(insn, 0), Value::Object(Default::default())),
+            O::ObjHas => {
+                let k = key_str(&self.pop()?);
+                let o = self.obj(a_var(insn, 0))?;
+                let has = o.borrow().has(&k);
+                self.push(Value::bool(has))?;
+            }
+            O::ObjKeys | O::ObjValues => {
+                let o = self.obj(a_var(insn, 0))?;
+                let items: Vec<Value> = if op == O::ObjKeys {
+                    o.borrow().iter().map(|(k, _)| Value::Str(k.clone())).collect()
+                } else {
+                    o.borrow().iter().map(|(_, v)| v.clone()).collect()
+                };
+                self.push_new(Value::arr(items))?;
+            }
+
+            // ---- tuple ----
+            O::TupleNew => {
+                let n = a_u8(insn, 0) as usize;
+                let mut items = Vec::with_capacity(n);
+                for _ in 0..n {
+                    items.push(self.pop()?);
+                }
+                items.reverse();
+                let t = Value::Tuple(std::rc::Rc::new(items));
+                check_store(&t, None)?;
+                self.push_new(t)?;
+            }
+            O::TupleGet => {
+                let idx = a_u8(insn, 0) as usize;
+                let Value::Tuple(t) = self.pop()? else { return Err("TUPLE_GET of a non-tuple".into()) };
+                let v = t.get(idx).cloned().ok_or_else(|| format!("tuple index {idx} out of range (len {})", t.len()))?;
+                self.push(v)?;
+            }
+            O::Unpack => {
+                let n = a_u8(insn, 0) as usize;
+                let Value::Tuple(t) = self.pop()? else { return Err("UNPACK of a non-tuple".into()) };
+                if t.len() != n {
+                    return Err(format!("UNPACK expects {n} values, tuple has {}", t.len()).into());
+                }
+                for v in t.iter().rev() {
+                    self.push(v.clone())?;
+                }
+            }
+
+            // ---- permissions / discovery ----
+            O::Need => self.op_need(a_u8(insn, 0), a_cref(insn, 1))?,
+            O::Glob => {
+                let pat = self.src(a_src(insn, 2))?;
+                let dir = self.src(a_src(insn, 1))?;
+                let (dir, pat) = (str_of(&dir, "GLOB dir")?, str_of(&pat, "GLOB pattern")?);
+                let canon = self.env.perms.check(dir, Access::Read)?;
+                let files = fsio::glob(&canon, dir, pat)?;
+                self.set_new(a_var(insn, 0), Value::arr(files.into_iter().map(Value::str).collect()))?;
+            }
+            O::Select | O::SelectMulti => {
+                let list = self.src(a_src(insn, 1))?;
+                let prompt = stringify(&self.konst(a_cref(insn, 2))?);
+                let v = self.op_select(list, &prompt, op == O::SelectMulti)?;
+                self.set_new(a_var(insn, 0), v)?;
+            }
+
+            // ---- functions ----
+            O::CallFn => self.op_call(a_u16(insn, 0) as usize, a_u8(insn, 1))?,
+            O::Ret => {
+                let v = self.src(a_src(insn, 0))?;
+                self.do_return(v)?;
+            }
+            O::CallLib => return Err("CALL_LIB is not available in this build".into()), // TODO(v2)
+
+            // ---- cleanup / errors ----
+            O::OnExit => {
+                let idx = self.prog.idx_of(a_addr(insn, 0)).ok_or("ON_EXIT address is not an instruction boundary")?;
+                if !self.in_handler {
+                    self.on_exit = Some((idx, self.callers.len()));
+                }
+            }
+            O::Try => {
+                if self.handlers.len() >= MAX_HANDLERS {
+                    return Err("too many nested TRY".into());
+                }
+                let addr_idx = self.prog.idx_of(a_addr(insn, 0)).ok_or("TRY handler is not an instruction boundary")?;
+                self.handlers.push(Handler {
+                    depth: self.callers.len(),
+                    stack_h: self.cur.stack.len(),
+                    loop_h: self.cur.loops.len(),
+                    addr_idx,
+                });
+            }
+            O::EndTry => {
+                self.handlers.pop().ok_or("END_TRY without TRY")?;
+            }
+        }
+        Ok(None)
+    }
+
+    fn arr(&self, v: u8) -> R<std::rc::Rc<std::cell::RefCell<Vec<Value>>>> {
+        match self.cur.vars.get(v)? {
+            Value::Arr(a) => Ok(a.clone()),
+            o => Err(format!("expected arr, got {}", o.type_name()).into()),
+        }
+    }
+    fn obj(&self, v: u8) -> R<std::rc::Rc<std::cell::RefCell<Obj>>> {
+        match self.cur.vars.get(v)? {
+            Value::Object(o) => Ok(o.clone()),
+            o => Err(format!("expected object, got {}", o.type_name()).into()),
+        }
+    }
+
+    /// ARR_GET / OBJ_GET. The compiler falls back to the ARR_* form when the base type is unknown,
+    /// so both opcodes dispatch on the runtime type of the base.
+    fn get_index(&mut self, var: u8, key: Value) -> R<Value> {
+        let base = self.var(var)?;
+        Ok(match &base {
+            Value::Arr(a) => {
+                let a = a.borrow();
+                a[arr_index(int_of(&key, "index")?, a.len())?].clone()
+            }
+            Value::Object(o) => o.borrow().get(&key_str(&key)).cloned().unwrap_or(Value::Null),
+            Value::Tuple(t) => t[arr_index(int_of(&key, "index")?, t.len())?].clone(),
+            Value::Buf(b) => Value::Int(b[arr_index(int_of(&key, "index")?, b.len())?] as i64),
+            Value::Str(s) => {
+                let i = int_of(&key, "index")?;
+                let n = s.chars().count();
+                Value::str(s.chars().nth(arr_index(i, n)?).map(String::from).unwrap_or_default())
+            }
+            o => return Err(format!("cannot index {}", o.type_name()).into()),
+        })
+    }
+
+    /// ARR_SET / OBJ_SET (same dynamic dispatch; tuples are fixed).
+    fn set_index(&mut self, var: u8, key: Value, val: Value) -> R<()> {
+        match self.var(var)? {
+            Value::Arr(a) => {
+                check_store(&val, Value::Arr(a.clone()).container_id())?;
+                let mut b = a.borrow_mut();
+                let i = arr_index(int_of(&key, "index")?, b.len())?;
+                b[i] = val;
+            }
+            Value::Object(o) => {
+                let k = key_str(&key);
+                check_store(&val, Value::Object(o.clone()).container_id())?;
+                self.alloc(16 + k.len() as u64)?;
+                o.borrow_mut().set(k.into(), val);
+            }
+            Value::Tuple(_) => return Err("cannot assign into a tuple (tuples are fixed)".into()),
+            o => return Err(format!("cannot index-assign {}", o.type_name()).into()),
+        }
+        Ok(())
+    }
+
+    fn op_call(&mut self, id: usize, argc: u8) -> R<()> {
+        let prog = self.prog;
+        let f = prog.fns.get(id).ok_or_else(|| format!("call of unknown fn id {id}"))?;
+        if argc != f.argc {
+            return Err(format!("fn '{}' takes {} args, called with {argc}", f.name, f.argc).into());
+        }
+        if self.callers.len() >= MAX_CALL_DEPTH {
+            return Err(format!("max recursion depth {MAX_CALL_DEPTH}").into());
+        }
+        let addr_idx = prog.idx_of(f.addr).ok_or_else(|| format!("fn '{}' address is not an instruction boundary", f.name))?;
+        let mut frame = Frame::new(Some(id), self.pc, f.end);
+        for i in (0..argc).rev() {
+            frame.vars.set(i, self.cur.stack.pop()?);
+        }
+        let old = std::mem::replace(&mut self.cur, frame);
+        self.callers.push(old);
+        self.pc = addr_idx;
+        Ok(())
+    }
+
+    fn op_for_start(&mut self, insn: &Insn) -> R<()> {
+        let var = a_var(insn, 0);
+        let end_idx = |vm: &Self| -> R<usize> {
+            let off = vm.prog.for_end.get(&insn.at).copied().ok_or("loop has no FOR_NEXT")?;
+            Ok(vm.prog.idx_of(off).ok_or("loop end is not an instruction boundary")?)
+        };
+        if insn.op == Opcode::ForEach {
+            let v = self.src(a_src(insn, 1))?;
+            let items: Vec<Value> = match &v {
+                Value::Arr(a) => a.borrow().clone(),
+                Value::Tuple(t) => t.to_vec(),
+                o => return Err(format!("cannot iterate over {}", o.type_name()).into()),
+            };
+            self.alloc(items.len() as u64 * 16)?;
+            match items.first() {
+                None => self.pc = end_idx(self)?,
+                Some(first) => {
+                    self.cur.vars.set(var, first.clone());
+                    self.cur.loops.push(LoopState::Each { var, items, idx: 0 });
+                }
+            }
+            return Ok(());
+        }
+        let step = if insn.op == Opcode::ForStep { self.int_src(a_src(insn, 3), "step")? } else { 1 };
+        let b = self.int_src(a_src(insn, 2), "range end")?;
+        let a = self.int_src(a_src(insn, 1), "range start")?;
+        if step < 1 {
+            return Err("FOR_STEP step must be >= 1".into());
+        }
+        if a >= b {
+            self.pc = end_idx(self)?;
+        } else {
+            self.cur.vars.set(var, Value::Int(a));
+            self.cur.loops.push(LoopState::Range { var, cur: a, end: b, step });
+        }
+        Ok(())
+    }
+
+    fn op_for_next(&mut self, body: usize) -> R<()> {
+        let next: Option<(u8, Value)> = match self.cur.loops.last_mut() {
+            None => return Err("FOR_NEXT without an active loop".into()),
+            Some(LoopState::Range { var, cur, end, step }) => match cur.checked_add(*step) {
+                Some(n) if n < *end => {
+                    *cur = n;
+                    Some((*var, Value::Int(n)))
+                }
+                _ => None,
+            },
+            Some(LoopState::Each { var, items, idx }) => {
+                *idx += 1;
+                items.get(*idx).map(|v| (*var, v.clone()))
+            }
+        };
+        match next {
+            Some((var, v)) => {
+                self.cur.vars.set(var, v);
+                self.goto(body)?;
+            }
+            None => {
+                self.cur.loops.pop();
+            }
+        }
+        Ok(())
+    }
+
+    fn op_need(&mut self, kind: u8, cref: u64) -> R<()> {
+        let kind = PermKind::try_from(kind).map_err(|e| e.to_string())?;
+        let text = stringify(&self.konst(cref)?);
+        match kind {
+            PermKind::Mem => {
+                let n = ops::parse_size(&text).ok_or_else(|| format!("bad NEED mem size '{text}'"))?;
+                let cur = self.env.perms.mem.unwrap_or(0);
+                self.env.perms.mem = Some(cur.max(n));
+                self.mem_limit = self.mem_limit.max(n);
+            }
+            PermKind::ReadDir | PermKind::WriteDir | PermKind::ReadFile | PermKind::WriteFile => {
+                self.env.perms.add(kind, &text)
+            }
+            _ => {} // camera/mic/net/exec rows belong to the launcher's permission table
+        }
+        Ok(())
+    }
+
+    fn op_write(&mut self, insn: &Insn) -> R<()> {
+        let off = self.int_src(a_src(insn, 2), "offset")?;
+        let dst = self.src(a_src(insn, 1))?;
+        let data = self.src(a_src(insn, 0))?;
+        let dst = str_of(&dst, "WRITE destination")?;
+        let data: &[u8] = match &data {
+            Value::Buf(b) => b,
+            Value::Str(s) => s.as_bytes(),
+            o => return Err(format!("WRITE needs buf or str, got {}", o.type_name()).into()),
+        };
+        if off < 0 {
+            return Err("WRITE offset must be >= 0".into());
+        }
+        let path = self.env.perms.check(dst, Access::Write)?;
+        fsio::write_atomic(&path, dst, data, off as u64, self.deadline, self.mem_limit)
+    }
+
+    fn op_select(&mut self, list: Value, prompt: &str, multi: bool) -> R<Value> {
+        let Value::Arr(a) = list else { return Err(format!("SELECT needs an arr, got {}", list.type_name()).into()) };
+        let items: Vec<Value> = a.borrow().clone();
+        if items.is_empty() {
+            return Err("nothing to select from".into());
+        }
+        let mut text = format!("{prompt}\n");
+        for (i, it) in items.iter().enumerate() {
+            text.push_str(&format!("  {}) {}\n", i + 1, stringify(it)));
+        }
+        self.say(&text)?;
+        for _ in 0..3 {
+            self.say(if multi { "numbers (comma separated)> " } else { "> " })?;
+            let _ = self.io.out.flush();
+            let line = self.read_line()?;
+            let parsed: Option<Vec<usize>> = line
+                .split(',')
+                .map(|t| t.trim().parse::<usize>().ok().filter(|n| (1..=items.len()).contains(n)))
+                .collect();
+            match parsed {
+                Some(ns) if multi => {
+                    return Ok(Value::arr(ns.iter().map(|n| items[n - 1].clone()).collect()));
+                }
+                Some(ns) if ns.len() == 1 => return Ok(items[ns[0] - 1].clone()),
+                _ => self.say("invalid choice\n")?,
+            }
+        }
+        Err("invalid selection".into())
+    }
+
+    // ---------------- launcher ops ----------------
+
+    fn require_entry(&self, r: u64) -> R<()> {
+        let l = self.launcher.as_ref().ok_or("not a launcher")?;
+        l.pak.entry(r).map(|_| ()).ok_or_else(|| fatal(EXIT_NOT_FOUND, format!("entry not found (ref {r})")))
+    }
+
+    fn arg_value(&self, name: &str, flag: bool) -> R<Option<String>> {
         let long = format!("--{name}");
         let pre = format!("--{name}=");
-        let a = &self.opts.args;
+        let a = &self.env.args;
         for (i, x) in a.iter().enumerate() {
             if *x == long {
                 if flag {
@@ -222,7 +1122,7 @@ impl<'a> Vm<'a> {
                     .get(i + 1)
                     .cloned()
                     .map(Some)
-                    .ok_or_else(|| ExecError::new(EXIT_MISUSE, format!("argument {long} needs a value")));
+                    .ok_or_else(|| fatal(EXIT_MISUSE, format!("argument {long} needs a value")));
             }
             if let Some(v) = x.strip_prefix(&pre) {
                 return Ok(Some(v.to_string()));
@@ -231,122 +1131,79 @@ impl<'a> Vm<'a> {
         Ok(None)
     }
 
-    pub fn run(&mut self) -> Result<i32, ExecError> {
-        if self.opts.args.iter().any(|a| a == "--help") {
-            print!("{}", self.usage()?);
-            return Ok(0);
+    fn op_arg(&mut self, insn: &Insn) -> R<()> {
+        let var = a_var(insn, 0);
+        let flags = a_u8(insn, 2);
+        let name = stringify(&self.konst(a_cref(insn, 1))?);
+        let name = name.trim_start_matches('-');
+        let is_flag = flags & 1 != 0;
+        let v = match self.arg_value(name, is_flag)? {
+            Some(s) if is_flag => Value::Int(s.parse::<i64>().unwrap_or(1)),
+            Some(s) => Value::str(s),
+            None if is_flag => Value::Int(0),
+            None if flags & 2 != 0 => return Err(fatal(EXIT_MISUSE, format!("missing required argument --{name}"))),
+            None => Value::str(""),
+        };
+        self.cur.vars.set(var, v);
+        Ok(())
+    }
+
+    fn usage(&self) -> R<String> {
+        let mut s = String::from("usage: <module.pak> [options]\n");
+        for insn in self.prog.insns.iter().filter(|i| i.op == Opcode::Arg) {
+            let n = stringify(&self.konst(a_cref(insn, 1))?);
+            let n = n.trim_start_matches('-');
+            let val = if a_u8(insn, 2) & 1 != 0 { "" } else { " <value>" };
+            let req = if a_u8(insn, 2) & 2 != 0 { " (required)" } else { "" };
+            s.push_str(&format!("  --{n}{val}  {}{req}\n", stringify(&self.konst(a_cref(insn, 3))?)));
         }
-        let code = &self.tun.code;
-        let width = self.tun.header.width;
-        let mut pc = 0;
-        while pc < code.len() {
-            let (insn, next) = decode(code, pc, width)?;
-            pc = next;
-            match insn {
-                Insn::Nop => {}
-                Insn::Halt => return Ok(0),
-                Insn::Set(v, c) => {
-                    let k = self.konst(c)?;
-                    self.vars.set(v, k);
-                }
-                Insn::Print(parts) => {
-                    let mut line = String::new();
-                    for p in parts {
-                        let v = match p {
-                            Src::Var(i) => self.vars.get(i)?.clone(),
-                            Src::Builtin(id) => self.builtin(id)?,
-                            Src::Const(i) => self.konst(i as u64)?,
-                            Src::Stack => self.pop()?,
-                        };
-                        line.push_str(&v.to_string());
-                    }
-                    println!("{line}");
-                }
-                Insn::Exit(n, c) => {
-                    let text = self.konst(c)?.to_string();
-                    if n != 0 {
-                        eprintln!("{text}");
-                    } else {
-                        println!("{text}");
-                    }
-                    return Ok(n as i32);
-                }
-                Insn::Arg { var, name, flags, desc: _ } => {
-                    let name = self.konst(name)?.to_string();
-                    let name = name.trim_start_matches('-');
-                    let is_flag = flags & 1 != 0;
-                    let v = match self.arg(name, is_flag)? {
-                        Some(s) if is_flag => Value::Int(s.parse::<i64>().unwrap_or(1)),
-                        Some(s) => Value::Str(s),
-                        None if is_flag => Value::Int(0),
-                        None if flags & 2 != 0 => {
-                            return Err(ExecError::new(EXIT_MISUSE, format!("missing required argument --{name}")))
-                        }
-                        None => Value::Str(String::new()),
-                    };
-                    self.vars.set(var, v);
-                }
-                Insn::Load(r) => {
-                    // v0: existence check only.
-                    self.require_entry(r)?;
-                    self.loaded.push(r);
-                }
-                Insn::LoadSrv => {
-                    // TODO(v2): LOAD_SRV
-                    return Err(err("LOAD_SRV not supported in this build"));
-                }
-                Insn::Run(r) => {
-                    let vars = &self.vars;
-                    let st = run_exec::run(self.pak, self.sb, r, self.opts, &|i| vars.get(i).map(|v| v.to_string()))?;
-                    self.last_exit = st;
-                }
-                Insn::Perm(id) => self.perms.push(id),
-                Insn::Verify(r) => self.require_entry(r)?,
-                Insn::PushVar(v) => {
-                    let x = self.vars.get(v)?.clone();
-                    self.push(x)?;
-                }
-                Insn::PushConst(c) => {
-                    let x = self.konst(c)?;
-                    self.push(x)?;
-                }
-                Insn::Cmp(op) => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    let ord = match (&a, &b) {
-                        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
-                        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
-                        _ => None,
-                    };
-                    let r = match (op, ord) {
-                        (Opcode::Eq, o) => o == Some(std::cmp::Ordering::Equal),
-                        (Opcode::Ne, o) => o != Some(std::cmp::Ordering::Equal),
-                        (_, None) => return Err(err("cannot order values of different types")),
-                        (Opcode::Gt, Some(o)) => o.is_gt(),
-                        (Opcode::Lt, Some(o)) => o.is_lt(),
-                        (Opcode::Ge, Some(o)) => o.is_ge(),
-                        (_, Some(o)) => o.is_le(),
-                    };
-                    self.push(Value::Int(r as i64))?;
-                }
-                Insn::Jz(a) | Insn::Jmp(a) => {
-                    let jump = match insn {
-                        Insn::Jz(_) => match self.pop()? {
-                            Value::Int(n) => n == 0,
-                            Value::Str(s) => s.is_empty(),
-                        },
-                        _ => true,
-                    };
-                    if jump {
-                        if a > code.len() {
-                            return Err(err(format!("jump target {a} outside code section")));
-                        }
-                        pc = a;
-                    }
-                }
+        s.push_str("  --help  show this help\n");
+        Ok(s)
+    }
+
+    fn op_run(&mut self, r: u64) -> R<Option<i32>> {
+        let Some(l) = self.launcher.as_ref() else { return Err("RUN not valid in .tzst".into()) };
+        let (pak, sb, opts) = (l.pak, l.sb, l.opts);
+        let e = pak.entry(r).ok_or_else(|| fatal(EXIT_NOT_FOUND, "entry not found"))?;
+        if e.entry_type == EntryType::Tzst {
+            // SPEC-GAP: no perm row is required for a tzst RUN (spec/01 kind 9 is for
+            // executables); scripts are covered by their own NEED rows.
+            let (tz, _) = TzstFile::parse(pak.bytes(e)).map_err(|x| fatal(EXIT_ERROR, format!("bad tzst '{}': {x}", e.path)))?;
+            if tz.tun.header.width != pak.dict.header.width {
+                return Err(fatal(EXIT_ERROR, format!("tzst '{}': width does not match the pak", e.path)));
             }
+            let prog = Program::build(&tz.tun.consts, &tz.tun.code, tz.tun.header.width, &tz.fns)?;
+            let env = std::mem::take(&mut self.env);
+            let mut nested = Vm::script(&prog, &mut *self.io, env, self.limits);
+            let code = nested.run_script();
+            self.env = nested.env;
+            self.env.last_exit = code;
+            return Ok(if code != 0 { Some(code) } else { None });
         }
-        // SPEC-GAP: running off the end of the code section is treated as an implicit HALT.
-        Ok(0)
+        let vars = &self.cur.vars;
+        let st = run_exec::run(pak, sb, r, opts, &|i| {
+            vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m))
+        })?;
+        self.env.last_exit = st;
+        Ok(None)
+    }
+}
+
+fn fault_to_exec(f: Fault) -> ExecError {
+    match f {
+        Fault::Rt(m) => ExecError::new(EXIT_ERROR, m),
+        Fault::Fatal(e) => e,
+    }
+}
+
+fn key_str(v: &Value) -> String {
+    stringify(v)
+}
+
+fn arr_index(i: i64, len: usize) -> Result<usize, String> {
+    let real = if i < 0 { i.checked_add(len as i64) } else { Some(i) };
+    match real {
+        Some(r) if r >= 0 && (r as usize) < len => Ok(r as usize),
+        _ => Err("index out of range".into()),
     }
 }

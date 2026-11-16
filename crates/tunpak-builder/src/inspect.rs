@@ -4,6 +4,7 @@ use std::fmt::Write;
 use tunpak_format::dict::{Dict, Perm, RunArg};
 use tunpak_format::pak::{split_signature, PakHeader};
 use tunpak_format::tun::TunFile;
+use tunpak_format::tzst::TzstFile;
 use tunpak_format::types::EntryType;
 
 use crate::packer::BuildError;
@@ -58,6 +59,22 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
         let (t, _) = TunFile::parse(body)?;
         let dis = tunpak_tzst::disassemble(&t.code, &t.consts, t.header.width).map_err(BuildError::Compile)?;
         let _ = writeln!(w, "\nmain.tun disassembly:\n{dis}");
+    }
+    for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Tzst) {
+        let body = pak
+            .get(e.offset as usize..(e.offset as usize).saturating_add(e.size as usize))
+            .ok_or_else(|| BuildError::Msg(format!("{} entry out of range", e.path)))?;
+        let (t, _) = TzstFile::parse(body)?;
+        let _ = writeln!(w, "\n{} fn table ({}):", e.path, t.fns.len());
+        for (id, f) in t.fns.iter().enumerate() {
+            let _ = writeln!(w, "  fn {id} {} argc {} addr {}", f.name, f.argc, f.addr);
+        }
+        let _ = writeln!(w, "{} imports ({}):", e.path, t.imports.len());
+        for (i, p) in t.imports.iter().enumerate() {
+            let _ = writeln!(w, "  {i} {p}");
+        }
+        let dis = tunpak_tzst::disassemble(&t.tun.code, &t.tun.consts, t.tun.header.width).map_err(|err| BuildError::Script { path: e.path.clone(), err })?;
+        let _ = writeln!(w, "{} disassembly:\n{dis}", e.path);
     }
     Ok(s)
 }

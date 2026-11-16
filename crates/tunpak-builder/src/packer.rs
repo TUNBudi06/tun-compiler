@@ -10,13 +10,15 @@ use tunpak_format::layout::*;
 use tunpak_format::pak::{append_signature, PakHeader};
 use tunpak_format::types::*;
 use tunpak_format::FormatError;
-use tunpak_tzst::{CompileError, TunOutput};
+use tunpak_tzst::{CompileError, TunOutput, TzstOutput};
 
 #[derive(Debug)]
 pub enum BuildError {
     Io(String),
     Format(FormatError),
     Compile(CompileError),
+    /// Compile error in a `.tzst` script (path relative to the module root).
+    Script { path: String, err: CompileError },
     Msg(String),
 }
 
@@ -26,6 +28,7 @@ impl fmt::Display for BuildError {
             BuildError::Io(s) | BuildError::Msg(s) => write!(f, "{s}"),
             BuildError::Format(e) => write!(f, "{e}"),
             BuildError::Compile(e) => write!(f, "main.tun:{}:{}: {}", e.line, e.col, e.msg),
+            BuildError::Script { path, err } => write!(f, "{path}:{}:{}: {}", err.line, err.col, err.msg),
         }
     }
 }
@@ -153,12 +156,17 @@ pub fn resolve_name(paths: &[&str], name: &str) -> Result<Option<usize>, Vec<Str
 
 pub type CompileFn<'a> = dyn Fn(&str, Width, &dyn Fn(&str) -> Option<u64>) -> Result<TunOutput, CompileError> + 'a;
 
+pub type TzstCompileFn<'a> = dyn Fn(&str, Width) -> Result<TzstOutput, CompileError> + 'a;
+
+/// Max rows in the permission table (count is 1 byte in the dict).
+pub const MAX_PERMS: usize = 255;
+
 pub fn pack_module(dir: &Path, opts: &PackOptions) -> Result<Vec<u8>, BuildError> {
-    pack_with(dir, opts, &|src, w, r| tunpak_tzst::compile_tun(src, w, r))
+    pack_with(dir, opts, &|src, w, r| tunpak_tzst::compile_tun(src, w, r), &|src, w| tunpak_tzst::compile_tzst(src, w))
 }
 
-/// `pack_module` with an injectable compiler (tests).
-pub fn pack_with(dir: &Path, opts: &PackOptions, compile: &CompileFn) -> Result<Vec<u8>, BuildError> {
+/// `pack_module` with injectable compilers (tests).
+pub fn pack_with(dir: &Path, opts: &PackOptions, compile: &CompileFn, compile_tzst: &TzstCompileFn) -> Result<Vec<u8>, BuildError> {
     let files = scan(dir)?;
     if files.len() > u16::MAX as usize {
         return msg(format!("too many entries: {} (max 65535)", files.len()));
@@ -203,10 +211,37 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, compile: &CompileFn) -> Result<
         });
     }
 
+    // Compile every script; its NEED rows follow main.tun's rows, identical rows once.
+    let mut compiled_scripts: Vec<Option<Vec<u8>>> = vec![None; files.len()];
+    for (i, f) in files.iter().enumerate() {
+        if entry_type_for(&f.path) != Some(EntryType::Tzst) {
+            continue;
+        }
+        let script_err = |err| BuildError::Script { path: f.path.clone(), err };
+        let src = std::str::from_utf8(&f.data).map_err(|_| BuildError::Msg(format!("{}: not valid UTF-8", f.path)))?;
+        let out = compile_tzst(src, opts.width).map_err(script_err)?;
+        for w in &out.warnings {
+            eprintln!("warning: {}: {w}", f.path);
+        }
+        for p in out.perms {
+            if !table.contains(&p) {
+                table.push(p);
+            }
+        }
+        let mut file = out.file;
+        file.tun.header.width = opts.width;
+        let mut b = Vec::new();
+        file.serialize(&mut b)?;
+        compiled_scripts[i] = Some(b);
+    }
+    if table.len() > MAX_PERMS {
+        return msg(format!("too many permission rows: {} (max {MAX_PERMS})", table.len()));
+    }
+
     let mut blob = Vec::new();
     let mut entries = Vec::new();
     for (i, f) in files.iter().enumerate() {
-        let data: &[u8] = if i == 0 { &tun_bytes } else { &f.data };
+        let data: &[u8] = if i == 0 { &tun_bytes } else { compiled_scripts[i].as_deref().unwrap_or(&f.data) };
         let ty = entry_type_for(&f.path).expect("scan only keeps layout files");
         let off = u32::try_from(PAK_HEADER_LEN + blob.len()).map_err(|_| BuildError::Msg("pak too large (>4 GiB)".into()))?;
         let size = u32::try_from(data.len()).map_err(|_| BuildError::Msg(format!("{}: too large", f.path)))?;
@@ -251,7 +286,6 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, compile: &CompileFn) -> Result<
     PakHeader { version: PAK_VERSION, dict_offset }.serialize(&mut out)?;
     out.extend_from_slice(&blob);
     dict.serialize(&mut out)?;
-    // TODO(v1): compile .tzst entries with tunpak-tzst (v0 stores raw source).
     // TODO(v2): sign instead of the empty (unsigned) signature.
     append_signature(&mut out, &[])?;
     Ok(out)
@@ -281,6 +315,7 @@ mod tests {
     use tunpak_format::dict::RunExec;
     use tunpak_format::pak::split_signature;
     use tunpak_format::tun::{TunFile, TunHeader};
+    use tunpak_format::tzst::TzstFile;
 
     pub fn tmpdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("tunpak-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
@@ -307,6 +342,19 @@ mod tests {
         put(&d, "other/file", b"skipped");
         put(&d, "stray.txt", b"skipped");
         d
+    }
+
+    fn fake_tzst(src: &str, w: Width) -> Result<TzstOutput, CompileError> {
+        if src == "BAD" {
+            return Err(CompileError::new(3, 4, "boom"));
+        }
+        let need = |p: &str| Perm::Path { kind: PermKind::ReadDir, path: p.into() };
+        let perms = if src == "NEED" { vec![need("/d"), need("/e")] } else if src == "NEED2" { vec![need("/e"), need("/f")] } else { vec![] };
+        Ok(TzstOutput {
+            file: TzstFile { tun: TunFile { header: TunHeader::new(w), consts: vec![], code: src.bytes().collect() }, fns: vec![], imports: vec![] },
+            perms,
+            warnings: vec![],
+        })
     }
 
     fn fake(_: &str, w: Width, r: &dyn Fn(&str) -> Option<u64>) -> Result<TunOutput, CompileError> {
@@ -364,7 +412,7 @@ mod tests {
         put(&d, "main.tun", b"");
         put(&d, "lib/zstd.so", b"1");
         put(&d, "run/zstd", b"2");
-        let e = pack_with(&d, &PackOptions::default(), &fake).unwrap_err().to_string();
+        let e = pack_with(&d, &PackOptions::default(), &fake, &fake_tzst).unwrap_err().to_string();
         assert!(e.contains("ambiguous entry name 'zstd': lib/zstd.so, run/zstd"), "{e}");
         fs::remove_dir_all(d).unwrap();
     }
@@ -373,8 +421,8 @@ mod tests {
     fn layout_and_dict() {
         let d = module("layout");
         let o = PackOptions { build_time: Some(42), app_id: 7, dev: true, ..Default::default() };
-        let pak = pack_with(&d, &o, &fake).unwrap();
-        assert_eq!(pack_with(&d, &o, &fake).unwrap(), pak, "deterministic");
+        let pak = pack_with(&d, &o, &fake, &fake_tzst).unwrap();
+        assert_eq!(pack_with(&d, &o, &fake, &fake_tzst).unwrap(), pak, "deterministic");
         let (h, _) = PakHeader::parse(&pak).unwrap();
         let sp = split_signature(&pak).unwrap();
         assert!(sp.signature.is_empty());
@@ -394,6 +442,9 @@ mod tests {
             if i == 0 {
                 let (t, _) = TunFile::parse(body).unwrap();
                 assert_eq!(t.code, [0x00, 0x10, 2, 0, 0, 0]); // zstd = lib/zstd.so = ref 2
+            } else if e.entry_type == EntryType::Tzst {
+                let (t, _) = TzstFile::parse(body).unwrap();
+                assert_eq!(t.tun.code, fs::read(d.join(&e.path)).unwrap());
             } else {
                 assert_eq!(body, fs::read(d.join(&e.path)).unwrap());
             }
@@ -414,10 +465,30 @@ mod tests {
                 perms: vec![Perm::Run(RunExec { path: "hello".into(), desc: "d".into(), args: vec![] })],
             })
         };
-        let pak = pack_with(&d, &PackOptions::default(), &f).unwrap();
+        let pak = pack_with(&d, &PackOptions::default(), &f, &fake_tzst).unwrap();
         let (h, _) = PakHeader::parse(&pak).unwrap();
         let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
         assert!(matches!(&dict.perms.perms[0], Perm::Run(x) if x.path == "run/hello"));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn script_perms_merged_and_errors() {
+        let d = tmpdir("sperm");
+        put(&d, "main.tun", b"");
+        put(&d, "lib/zstd.so", b"L");
+        put(&d, "run/hello", b"R");
+        put(&d, "scripts/a.tzst", b"NEED");
+        put(&d, "scripts/b.tzst", b"NEED2");
+        let pak = pack_with(&d, &PackOptions::default(), &fake, &fake_tzst).unwrap();
+        let (h, _) = PakHeader::parse(&pak).unwrap();
+        let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
+        // main rows (fake: net, run) first, then /d /e /f once each
+        assert_eq!(dict.perms.perms.len(), 5);
+        assert!(matches!(&dict.perms.perms[4], Perm::Path { path, .. } if path == "/f"));
+        put(&d, "scripts/c.tzst", b"BAD");
+        let e = pack_with(&d, &PackOptions::default(), &fake, &fake_tzst).unwrap_err().to_string();
+        assert_eq!(e, "scripts/c.tzst:3:4: boom");
         fs::remove_dir_all(d).unwrap();
     }
 

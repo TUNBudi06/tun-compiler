@@ -1,4 +1,5 @@
-//! main.tun compiler (spec/04 "main.tun", spec/07). v0 subset: no if/elif/else.
+//! main.tun compiler (spec/04 "main.tun", spec/07). `if/elif/else` conditions are a single
+//! comparison between `$BUILTIN` / `@var` / literal operands.
 use crate::lexer::{lex, Tok, Token};
 use crate::{CompileError, Resolver, TunOutput};
 use std::collections::HashMap;
@@ -146,6 +147,86 @@ impl<'a> P<'a> {
         Ok(())
     }
 
+    /// emit a jump with a placeholder address; returns the patch site
+    fn jump(&mut self, op: Opcode) -> usize {
+        self.op(op);
+        self.code.extend([0; 4]);
+        self.code.len() - 4
+    }
+    fn patch(&mut self, site: usize) {
+        let h = self.code.len() as u32;
+        self.code[site..site + 4].copy_from_slice(&h.to_le_bytes());
+    }
+    fn cond_operand(&mut self) -> Result<(), CompileError> {
+        let a = self.next()?;
+        match &a.tok {
+            Tok::Builtin(n) => {
+                let id = builtin_id(n).ok_or_else(|| err(&a, format!("unknown builtin {n}")))?;
+                self.op(Opcode::PushBuiltin);
+                self.code.push(id);
+            }
+            Tok::UserVar(n) => {
+                let v = self.lookup(&a, n)?;
+                self.op(Opcode::PushVar);
+                self.code.push(v);
+            }
+            Tok::Str(s) => {
+                self.op(Opcode::PushConst);
+                self.cref(Const::Str(s.clone()));
+            }
+            Tok::Int(n) => {
+                self.op(Opcode::PushConst);
+                self.cref(Const::Int(*n));
+            }
+            _ => return Err(err(&a, "condition operands must be $BUILTIN, @var or a literal")),
+        }
+        Ok(())
+    }
+    /// `if A <op> B { } [elif A <op> B { }]* [else { }]`; `if` is already consumed.
+    fn if_stmt(&mut self) -> Result<(), CompileError> {
+        let mut ends = vec![];
+        loop {
+            self.cond_operand()?;
+            let c = self.next()?;
+            let op = match &c.tok {
+                Tok::Punct("==") => Opcode::Eq,
+                Tok::Punct("!=") => Opcode::Ne,
+                Tok::Punct("<") => Opcode::Lt,
+                Tok::Punct(">") => Opcode::Gt,
+                Tok::Punct("<=") => Opcode::Le,
+                Tok::Punct(">=") => Opcode::Ge,
+                _ => return Err(err(&c, "expected a comparison (== != < > <= >=)")),
+            };
+            self.cond_operand()?;
+            self.op(op);
+            let next = self.jump(Opcode::Jz);
+            self.body()?;
+            let more = matches!(self.peek(), Some(Token { tok: Tok::Ident(k), .. }) if k == "elif" || k == "else");
+            if more {
+                ends.push(self.jump(Opcode::Jmp));
+            }
+            self.patch(next);
+            if !more {
+                break;
+            }
+            let k = self.next()?;
+            if matches!(&k.tok, Tok::Ident(s) if s == "else") {
+                self.body()?;
+                break;
+            }
+        }
+        ends.into_iter().for_each(|e| self.patch(e));
+        Ok(())
+    }
+    fn body(&mut self) -> Result<(), CompileError> {
+        self.expect("{")?;
+        while !self.is_punct("}") {
+            self.stmt()?;
+        }
+        self.pos += 1;
+        Ok(())
+    }
+
     fn print_parts(&mut self, t: &Token) -> Result<(), CompileError> {
         enum Part {
             C(String),
@@ -216,8 +297,12 @@ impl<'a> P<'a> {
 
     fn stmt(&mut self) -> Result<(), CompileError> {
         let t = self.next()?;
-        let Tok::Ident(kw) = &t.tok else { return Err(err(&t, "expected a statement")) };
+        let Tok::Ident(kw) = &t.tok else {
+            let after_brace = self.pos >= 2 && matches!(self.toks[self.pos - 2].tok, Tok::Punct("}"));
+            return Err(err(&t, if after_brace && matches!(t.tok, Tok::Punct(";")) { "unexpected ';' after '}'" } else { "expected a statement" }));
+        };
         match kw.as_str() {
+            "if" => return self.if_stmt(),
             "set" => {
                 let v = self.var_def()?;
                 self.expect("=")?;
@@ -308,7 +393,7 @@ impl<'a> P<'a> {
                 self.code.push(flag as u8);
                 self.cref(Const::Str(desc));
             }
-            "if" | "elif" | "else" => return Err(err(&t, format!("'{kw}' is not supported yet in main.tun"))),
+            "elif" | "else" => return Err(err(&t, format!("'{kw}' without a matching 'if'"))),
             _ => return Err(err(&t, format!("unknown statement '{kw}'"))),
         }
         self.semi()
@@ -428,10 +513,31 @@ mod tests {
     }
 
     #[test]
+    fn if_elif_else_targets() {
+        use tunpak_format::operands::{decode_all, Arg};
+        let o = c("LOAD { if $OS == \"termux\" { load zstd_lib; } elif $ARCH == \"arm64\" { load api; } else { load app_tzst; if 1 < 2 { halt; } } }").unwrap();
+        let ins = decode_all(&o.file.code, Width::W4).unwrap();
+        let starts: Vec<usize> = ins.iter().map(|i| i.at).collect();
+        let mut jumps = 0;
+        for i in &ins {
+            for a in &i.args {
+                if let Arg::Addr(t) = a {
+                    jumps += 1;
+                    assert!(starts.contains(&(*t as usize)) || *t as usize == o.file.code.len(), "{t}");
+                }
+            }
+        }
+        assert_eq!(jumps, 5);
+        assert!(ins.iter().any(|i| i.op == Opcode::PushBuiltin));
+        let d = disassemble(&o.file.code, &o.file.consts, Width::W4).unwrap();
+        assert!(d.contains("PUSH_BUILTIN 1"), "{d}");
+    }
+
+    #[test]
     fn disasm_errors() {
         assert!(disassemble(&[0, 4, 0], &[], Width::W4).unwrap_err().msg.contains("0x0000"));
         assert!(disassemble(&[0xEE, 0xEE], &[], Width::W4).is_err());
-        assert!(disassemble(&[0, 0x65], &[], Width::W4).unwrap_err().msg.contains("SUBSTR"));
+        assert_eq!(disassemble(&[0, 0x65], &[], Width::W4).unwrap(), "0000  SUBSTR\n");
     }
 
     #[test]
@@ -444,7 +550,11 @@ mod tests {
         assert!(c("START { halt; } START { halt; }").unwrap_err().msg.contains("duplicate"));
         assert!(c("MAIN { run api; run api (1); }").is_err());
         assert!(c("MAIN { run api; run api; }").is_ok());
-        assert!(c("LOAD { if $OS == \"x\" { halt; } }").unwrap_err().msg.contains("not supported yet"));
+        assert!(c("LOAD { if $OS == \"x\" { halt; } }").is_ok());
+        assert!(c("LOAD { else { halt; } }").unwrap_err().msg.contains("without a matching"));
+        assert!(c("LOAD { if $OS == \"x\" { halt; }; }").unwrap_err().msg.contains("after '}'"));
+        assert!(c("LOAD { if $OS { halt; } }").is_err());
+        assert!(c("LOAD { if @nope == 1 { halt; } }").unwrap_err().msg.contains("before"));
     }
 
     #[test]

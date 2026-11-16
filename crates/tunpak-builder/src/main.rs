@@ -7,7 +7,7 @@ use tunpak_format::types::Width;
 const USAGE: &str = "usage:
   tunpak build <dir> -o <out.pak> [--width 4|8]
   tunpak inspect <x.pak>
-  tunpak dev run <path/to/main.tun> [-- args...]
+  tunpak dev run <path/to/main.tun | script.tzst> [-- args...]
   tunpak keygen | setup-server | setup-user | gen-generator | gen-executor | lib-check  (not implemented yet)";
 
 fn fail(e: impl std::fmt::Display) -> ! {
@@ -37,6 +37,21 @@ fn build(args: &[String]) -> Result<(), BuildError> {
     write_atomic(Path::new(&out), &pak)
 }
 
+/// Compile one `.tzst` and run it directly (dev mode, real stdio).
+fn dev_run_tzst(path: &Path, opts: &tunpak_executor::RunOptions) -> Result<i32, tunpak_executor::ExecError> {
+    let name = path.display();
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| fail(format!("cannot read {name}: {e}")));
+    let out = tunpak_tzst::compile_tzst(&src, Width::W4).unwrap_or_else(|e| fail(format!("{name}:{}:{}: {}", e.line, e.col, e.msg)));
+    for w in &out.warnings {
+        eprintln!("warning: {name}: {w}");
+    }
+    let (mut o, mut e) = (std::io::stdout(), std::io::stderr());
+    let stdin = std::io::stdin();
+    let mut i = stdin.lock();
+    let mut io = tunpak_executor::Io { out: &mut o, err: &mut e, input: &mut i };
+    tunpak_executor::run_tzst(&out.file, opts, &mut io)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -50,13 +65,19 @@ fn main() {
         Some("dev") if args.get(1).map(String::as_str) == Some("run") && args.len() > 2 => {
             let pak_args = &args[2..];
             let main = PathBuf::from(&pak_args[0]);
-            let dir = match main.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                _ => PathBuf::from("."),
-            };
             let rest: Vec<String> = pak_args[1..].iter().skip_while(|a| *a == "--").cloned().collect();
-            let pak = pack_module(&dir, &PackOptions { dev: true, ..Default::default() }).unwrap_or_else(|e| fail(e));
-            match tunpak_executor::run_pak_bytes(&pak, &tunpak_executor::RunOptions { dev: true, args: rest }) {
+            let opts = tunpak_executor::RunOptions { dev: true, args: rest, ..Default::default() };
+            let res = if main.extension().is_some_and(|e| e == "tzst") {
+                dev_run_tzst(&main, &opts)
+            } else {
+                let dir = match main.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                    _ => PathBuf::from("."),
+                };
+                let pak = pack_module(&dir, &PackOptions { dev: true, ..Default::default() }).unwrap_or_else(|e| fail(e));
+                tunpak_executor::run_pak_bytes(&pak, &opts)
+            };
+            match res {
                 Ok(code) => exit(code),
                 Err(e) => {
                     eprintln!("error: {}", e.msg);

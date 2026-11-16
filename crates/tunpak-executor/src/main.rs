@@ -9,7 +9,7 @@ fn main() {
         std::process::exit(tunpak_executor::EXIT_MISUSE);
     }
     let pak = args.remove(0);
-    let opts = tunpak_executor::RunOptions { dev, args };
+    let opts = tunpak_executor::RunOptions { dev, args, ..Default::default() };
     match tunpak_executor::run_pak(std::path::Path::new(&pak), &opts) {
         Ok(code) => std::process::exit(code),
         Err(e) => {

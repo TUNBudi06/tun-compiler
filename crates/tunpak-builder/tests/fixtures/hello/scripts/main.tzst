@@ -1,0 +1,12 @@
+fn square(@n) -> (@r) {
+    let @r = @n * @n;
+    return @r;
+}
+
+start {
+    print "hello";
+    for @i in 1..4 {
+        let @s = square(@i);
+        print f"sq @i = @s";
+    }
+}

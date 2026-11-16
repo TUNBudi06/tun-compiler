@@ -52,6 +52,8 @@ opcodes! {
     Dup = 0x0033, "DUP";
     Swap = 0x0034, "SWAP";
     Pop = 0x0035, "POP";
+    // SPEC-GAP: spec/02 lists no opcode to push a builtin; added in free space, nothing existing changes meaning.
+    PushBuiltin = 0x0036, "PUSH_BUILTIN";
     PushVar = 0x0040, "PUSH_VAR";
     PushConst = 0x0041, "PUSH_CONST";
     // comparison

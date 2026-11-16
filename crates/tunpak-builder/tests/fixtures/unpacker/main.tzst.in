@@ -1,0 +1,15 @@
+# {DIR} is replaced by the test (NEED paths must be literals).
+NEED read "{DIR}";
+
+start {
+    endian little;
+    let @f = "{DIR}/blob.bin";
+    let @magic = read_u32 @f 0;
+    let @ver = read_u8 @f 4;
+    let @name = read_str @f 8 5;
+    if @magic == 0x00535A54 {
+        print f"ok v@ver @name";
+    } else {
+        exit 2 "bad magic";
+    }
+}
