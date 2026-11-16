@@ -1,0 +1,5 @@
+target/
+*.pak
+!tests/**/*.pak
+*.key
+identity.tzid

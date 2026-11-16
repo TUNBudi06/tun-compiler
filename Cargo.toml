@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Executor hardening (spec/08). Cargo only honors profiles at the workspace root.
+# SPEC-GAP: spec wants the builder un-hardened but cargo profiles are workspace-wide;
+# builder simply skips obfstr. strip/lto/panic=abort on the builder are harmless.
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"
+panic = "abort"
+codegen-units = 1
