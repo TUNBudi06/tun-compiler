@@ -11,3 +11,7 @@ tunpak-executor = { path = "../tunpak-executor" }
 [[bin]]
 name = "tunpak"
 path = "src/main.rs"
+
+[lib]
+name = "tunpak_builder"
+path = "src/lib.rs"

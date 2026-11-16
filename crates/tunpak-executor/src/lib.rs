@@ -2,6 +2,12 @@
 //! A library so the builder's `tunpak dev run` and integration tests share the exact VM;
 //! `main.rs` is the thin shipped binary.
 
+pub mod loader;
+pub mod platform;
+pub mod sandbox;
+pub mod verify;
+pub mod vm;
+
 use std::path::Path;
 
 /// Exit codes fixed by spec/03 "Exit codes".
@@ -47,6 +53,20 @@ pub fn run_pak(path: &Path, opts: &RunOptions) -> Result<i32, ExecError> {
 }
 
 /// Run a `.pak` already in memory (used by `tunpak dev run`).
-pub fn run_pak_bytes(_pak: &[u8], _opts: &RunOptions) -> Result<i32, ExecError> {
-    todo!("v0: executor")
+pub fn run_pak_bytes(pak: &[u8], opts: &RunOptions) -> Result<i32, ExecError> {
+    run_inner(pak, opts).map(|(code, _)| code)
 }
+
+/// Returns (exit code, final `$?`). Order matters: verify -> parse -> run (invariant 4).
+fn run_inner(pak: &[u8], opts: &RunOptions) -> Result<(i32, i32), ExecError> {
+    let signed = verify::verify(pak, opts)?;
+    let pak = loader::Pak::load(signed)?;
+    let tun = pak.tun()?;
+    let sb = sandbox::Sandbox::new()?; // removed on drop, on every return path
+    let mut vm = vm::interp::Vm::new(&pak, &tun, opts, &sb);
+    let code = vm.run()?;
+    Ok((code, vm.last_exit))
+}
+
+#[cfg(test)]
+mod tests;

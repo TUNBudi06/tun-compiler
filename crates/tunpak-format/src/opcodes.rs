@@ -169,6 +169,45 @@ pub const SRC_USER_VAR: u8 = 0x00; // + index:1
 pub const SRC_BUILTIN: u8 = 0x01; // + builtin_id:1
 pub const SRC_CONST_FLAG: u8 = 0x80; // 0x80|i: const pool index i in low 7 bits
 pub const SRC_STACK: u8 = 0xFF; // no payload
+/// SPEC-GAP: spec/02 says "for i>large use following varint — impl detail". Chosen: indices
+/// 0..=0x7D are `0x80|i` in one byte; `0xFE` is followed by a varint of the full index.
+/// 0xFF stays "from stack", so the encoding is the same for both PRINT opcodes.
+pub const SRC_CONST_ESCAPE: u8 = 0xFE;
+
+/// Emit a const-pool `<src>`.
+pub fn write_src_const(idx: u64, out: &mut Vec<u8>) {
+    if idx < (SRC_CONST_ESCAPE & 0x7F) as u64 {
+        out.push(SRC_CONST_FLAG | idx as u8);
+    } else {
+        out.push(SRC_CONST_ESCAPE);
+        crate::varint::encode(idx, out);
+    }
+}
+
+/// Decode a const-pool `<src>` whose marker byte (high bit set, not 0xFF) was already read;
+/// `rest` is the bytes after the marker. Returns (index, bytes consumed from `rest`).
+pub fn read_src_const(marker: u8, rest: &[u8]) -> Result<(u64, usize), crate::FormatError> {
+    if marker == SRC_CONST_ESCAPE {
+        crate::varint::decode(rest)
+    } else {
+        Ok(((marker & 0x7F) as u64, 0))
+    }
+}
+
+#[cfg(test)]
+mod src_const_tests {
+    use super::*;
+    #[test]
+    fn const_src_round_trip() {
+        for i in [0u64, 1, 0x7D, 0x7E, 0x7F, 128, 70_000] {
+            let mut b = Vec::new();
+            write_src_const(i, &mut b);
+            assert_ne!(b[0], SRC_STACK);
+            let (got, n) = read_src_const(b[0], &b[1..]).unwrap();
+            assert_eq!((got, n + 1), (i, b.len()));
+        }
+    }
+}
 
 // SPEC-GAP: spec/03 lists builtin variable names but assigns no ids. Ids are the 0-based
 // position in that list ($PID=0, $OS=1, ... $?=15). Append-only; never reorder.
