@@ -1,0 +1,13 @@
+[package]
+name = "tunpak-builder"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tunpak-format = { path = "../tunpak-format" }
+tunpak-tzst = { path = "../tunpak-tzst" }
+tunpak-executor = { path = "../tunpak-executor" }
+
+[[bin]]
+name = "tunpak"
+path = "src/main.rs"

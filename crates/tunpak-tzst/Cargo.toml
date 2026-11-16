@@ -1,0 +1,7 @@
+[package]
+name = "tunpak-tzst"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tunpak-format = { path = "../tunpak-format" }
