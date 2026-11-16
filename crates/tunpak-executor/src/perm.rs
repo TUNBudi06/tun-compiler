@@ -1,6 +1,7 @@
 //! Permission manifest + approval (spec/06 "Security philosophy"). The manifest is rendered by the
 //! executor from the SIGNED permission table; maker-provided strings are escaped so a description
 //! can neither hide nor forge manifest lines.
+use obfstr::obfstr as ob;
 use crate::{ExecError, Io, RunOptions, EXIT_PERM_DENIED};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -41,8 +42,8 @@ pub fn var_display(stored: &str) -> &str {
 pub fn render_manifest(d: &Dict) -> String {
     let h = &d.header;
     let mut s = String::new();
-    let _ = writeln!(s, "This module requests the following permissions:");
-    let _ = writeln!(s, "  App ID: {}   Author ID: {}   Pak version: {}", h.app_id, h.author_id, h.pak_version);
+    let _ = writeln!(s, "{}", ob!("This module requests the following permissions:"));
+    let _ = writeln!(s, "{}{}{}{}{}{}", ob!("  App ID: "), h.app_id, ob!("   Author ID: "), h.author_id, ob!("   Pak version: "), h.pak_version);
     let rows = |pred: &dyn Fn(PermKind) -> bool| -> Vec<(PermKind, &str)> {
         d.perms
             .perms
@@ -53,50 +54,50 @@ pub fn render_manifest(d: &Dict) -> String {
             })
             .collect()
     };
-    let label = |k: PermKind| match k {
-        PermKind::ReadDir => "read dir ",
-        PermKind::WriteDir => "write dir",
-        PermKind::ReadFile => "read file",
-        PermKind::WriteFile => "write file",
-        _ => "",
-    };
+    let label = |k: PermKind| -> String { match k {
+        PermKind::ReadDir => ob!("read dir ").to_owned(),
+        PermKind::WriteDir => ob!("write dir").to_owned(),
+        PermKind::ReadFile => ob!("read file").to_owned(),
+        PermKind::WriteFile => ob!("write file").to_owned(),
+        _ => String::new(),
+    } };
     let files = rows(&|k| matches!(k, PermKind::ReadDir | PermKind::WriteDir | PermKind::ReadFile | PermKind::WriteFile));
     if !files.is_empty() {
-        let _ = writeln!(s, "File access:");
+        let _ = writeln!(s, "{}", ob!("File access:"));
         for (k, p) in files {
-            let _ = writeln!(s, "  {} {}", label(k), escape(p));
+            let _ = writeln!(s, "{}{} {}", ob!("  "), label(k), escape(p));
         }
     }
     let mem = rows(&|k| k == PermKind::Mem);
     if !mem.is_empty() {
-        let _ = writeln!(s, "Memory:");
+        let _ = writeln!(s, "{}", ob!("Memory:"));
         for (_, p) in mem {
-            let _ = writeln!(s, "  up to {}", escape(p));
+            let _ = writeln!(s, "{}{}", ob!("  up to "), escape(p));
         }
     }
     let hw = rows(&|k| matches!(k, PermKind::Camera | PermKind::Mic | PermKind::Net));
     if !hw.is_empty() {
-        let _ = writeln!(s, "Camera / microphone / network:");
+        let _ = writeln!(s, "{}", ob!("Camera / microphone / network:"));
         for (k, p) in hw {
             let name = match k {
-                PermKind::Camera => "camera",
-                PermKind::Mic => "microphone",
-                _ => "network",
+                PermKind::Camera => ob!("camera").to_owned(),
+                PermKind::Mic => ob!("microphone").to_owned(),
+                _ => ob!("network").to_owned(),
             };
-            let _ = writeln!(s, "  {name}{}{}", if p.is_empty() { "" } else { " " }, escape(p));
+            let _ = writeln!(s, "{}{name}{}{}", ob!("  "), if p.is_empty() { "" } else { " " }, escape(p));
         }
     }
     for p in &d.perms.perms {
         let Perm::Run(x) = p else { continue };
-        let _ = writeln!(s, "Runs program: {}", escape(&x.path));
-        let _ = writeln!(s, "  Description (maker's claim): \"{}\"", escape(&x.desc));
+        let _ = writeln!(s, "{}{}", ob!("Runs program: "), escape(&x.path));
+        let _ = writeln!(s, "{}{}\"", ob!("  Description (maker's claim): \""), escape(&x.desc));
         for (i, a) in x.args.iter().enumerate() {
             match a {
                 RunArg::Const(v) => {
-                    let _ = writeln!(s, "  Argument {}: \"{}\"", i + 1, escape(v));
+                    let _ = writeln!(s, "{}{}{}{}\"", ob!("  Argument "), i + 1, ob!(": \""), escape(v));
                 }
                 RunArg::Var(n) => {
-                    let _ = writeln!(s, "  Argument {}: <{}> (value shown at run time)", i + 1, escape(var_display(n)));
+                    let _ = writeln!(s, "{}{}{}{}{}", ob!("  Argument "), i + 1, ob!(": <"), escape(var_display(n)), ob!("> (value shown at run time)"));
                 }
             }
         }
@@ -111,7 +112,7 @@ fn read_answer(io: &mut Io) -> String {
 }
 
 fn out_err(e: std::io::Error) -> ExecError {
-    ExecError::new(crate::EXIT_ERROR, format!("output error: {e}"))
+    ExecError::new(crate::EXIT_ERROR, format!("{}{e}", ob!("output error: ")))
 }
 
 /// Show the manifest and ask. `Ok(true)` = go ahead. Dev auto-approves without printing; an empty
@@ -124,7 +125,7 @@ pub fn approve_manifest(d: &Dict, opts: &RunOptions, io: &mut Io) -> Result<bool
     if opts.assume_yes {
         return Ok(true);
     }
-    write!(io.out, "Allow? [y/N] ").map_err(out_err)?;
+    write!(io.out, "{}", ob!("Allow? [y/N] ")).map_err(out_err)?;
     let _ = io.out.flush();
     Ok(matches!(read_answer(io).as_str(), "y" | "yes"))
 }
@@ -140,22 +141,22 @@ pub fn confirm_run(
 ) -> Result<(), ExecError> {
     let argv = values.iter().map(|v| escape(v)).collect::<Vec<_>>().join(" ");
     if opts.dev {
-        let _ = writeln!(io.err, "[dev] RUN {} {argv}", escape(&row.path));
+        let _ = writeln!(io.err, "{}{} {argv}", ob!("[dev] RUN "), escape(&row.path));
         return Ok(());
     }
     if opts.assume_yes || run_all.borrow().contains(&row.path) {
         return Ok(());
     }
     let name = row.path.rsplit('/').next().unwrap_or(&row.path);
-    let mut t = format!("\u{25B6} RUN: {}\n  Description (maker's claim): \"{}\"\n  Arguments:\n", escape(name), escape(&row.desc));
+    let mut t = format!("{}{}{}{}{}", ob!("\u{25B6} RUN: "), escape(name), ob!("\n  Description (maker's claim): \""), escape(&row.desc), ob!("\"\n  Arguments:\n"));
     for (i, v) in values.iter().enumerate() {
         let note = match row.args.get(i) {
-            Some(RunArg::Var(n)) => format!("   (value of @{})", escape(var_display(n))),
+            Some(RunArg::Var(n)) => format!("{}{}{}", ob!("   (value of @"), escape(var_display(n)), ob!(")")),
             _ => String::new(),
         };
-        let _ = writeln!(t, "    {}: {}{note}", i + 1, escape(v));
+        let _ = writeln!(t, "{}{}{}{}{note}", ob!("    "), i + 1, ob!(": "), escape(v));
     }
-    t.push_str("[r]un / run [a]ll / [d]eny: ");
+    t.push_str(ob!("[r]un / run [a]ll / [d]eny: "));
     write!(io.out, "{t}").map_err(out_err)?;
     let _ = io.out.flush();
     match read_answer(io).as_str() {
@@ -164,6 +165,6 @@ pub fn confirm_run(
             run_all.borrow_mut().insert(row.path.clone());
             Ok(())
         }
-        _ => Err(ExecError::new(EXIT_PERM_DENIED, format!("RUN of '{}' denied by user", escape(&row.path)))),
+        _ => Err(ExecError::new(EXIT_PERM_DENIED, format!("{}{}{}", ob!("RUN of '"), escape(&row.path), ob!("' denied by user")))),
     }
 }

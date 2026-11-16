@@ -77,7 +77,8 @@ impl Ran {
     }
     /// Did not run the module: failed, and nothing past the manifest was printed.
     fn refused(&self) -> bool {
-        !self.ok() && !self.out.contains("done") && !self.out.contains("42")
+        // whole-line match: the manifest prints random app/author ids that can contain "42"
+        !self.ok() && !self.out.contains("done") && !self.out.lines().any(|l| l == "42")
     }
 }
 fn run(pak: &[u8], o: &RunOptions, stdin: &str) -> Ran {

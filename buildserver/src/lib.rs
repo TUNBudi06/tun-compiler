@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tunpak_format::buildreq::BuildRequest;
 use tunpak_format::config::ServerConfig;
 use tunpak_format::FormatError;
@@ -19,7 +19,22 @@ pub struct Config {
     pub data: PathBuf,
     /// Workspace dir holding `crates/`, `Cargo.lock` and the root `Cargo.toml`.
     pub template: PathBuf,
+    /// Per-target `cargo build` limit.
+    pub build_timeout: Duration,
+    /// Total time allowed to read one request (head + body).
+    pub read_deadline: Duration,
 }
+
+/// Creates `<data>/work` and returns the absolute data dir; cargo runs with a different cwd, so
+/// a relative path would resolve wrongly there. Library callers building a `Config` should use it.
+pub fn prepare_data_dir(data: &std::path::Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(data.join("work")).map_err(|e| format!("cannot create {}: {e}", data.display()))?;
+    std::fs::canonicalize(data).map_err(|e| format!("cannot resolve {}: {e}", data.display()))
+}
+
+pub const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(30);
+const TIMED_OUT: &str = "request timed out";
 
 /// (status, body)
 pub type Resp = (u16, Vec<u8>);
@@ -76,6 +91,7 @@ fn write_resp(s: &mut TcpStream, (status, body): Resp) -> std::io::Result<()> {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         503 => "Service Unavailable",
         _ => "Error",
@@ -128,6 +144,7 @@ fn handle(mut s: TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> std::io::Re
     s.set_write_timeout(Some(TIMEOUT))?;
     let (resp, line) = match respond(&mut s, cfg, build_lock) {
         Ok(x) => x,
+        Err(TIMED_OUT) => (text(408, TIMED_OUT), String::from("? ?")),
         Err(msg) => (text(400, msg), String::from("? ?")),
     };
     eprintln!("{line} -> {}", resp.0);
@@ -136,6 +153,20 @@ fn handle(mut s: TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> std::io::Re
 
 /// Returns the response and a log line (`METHOD PATH app_id=..`). Never logs bodies or keys.
 fn respond(s: &mut TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> Result<(Resp, String), &'static str> {
+    let deadline = Instant::now() + cfg.read_deadline;
+    // Each read is capped by the time left, so slow drips cannot outlive the total deadline.
+    let rd = |s: &mut TcpStream, b: &mut [u8]| -> Result<usize, &'static str> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(TIMED_OUT);
+        }
+        s.set_read_timeout(Some(left.min(TIMEOUT))).map_err(|_| "incomplete request")?;
+        match s.read(b) {
+            Ok(n) => Ok(n),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Err(TIMED_OUT),
+            Err(_) => Ok(0),
+        }
+    };
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let end = loop {
@@ -145,9 +176,9 @@ fn respond(s: &mut TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> Result<(R
         if buf.len() > MAX_HEAD {
             return Err("request head too large");
         }
-        match s.read(&mut chunk) {
-            Ok(0) | Err(_) => return Err("incomplete request"),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        match rd(s, &mut chunk)? {
+            0 => return Err("incomplete request"),
+            n => buf.extend_from_slice(&chunk[..n]),
         }
     };
     let head = parse_head(&buf[..end])?;
@@ -176,8 +207,13 @@ fn respond(s: &mut TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> Result<(R
         return Err("body longer than Content-Length");
     }
     body.resize(len, 0);
-    let have = buf.len() - end - 4;
-    s.read_exact(&mut body[have..]).map_err(|_| "incomplete body")?;
+    let mut have = buf.len() - end - 4;
+    while have < len {
+        match rd(s, &mut body[have..])? {
+            0 => return Err("incomplete body"),
+            n => have += n,
+        }
+    }
     let (resp, app) = if want == "key" {
         license::handle_key(&cfg.data, &body)
     } else {
@@ -247,7 +283,7 @@ fn handle_build(cfg: &Config, lock: &Mutex<()>, body: &[u8], master_hex: Option<
     };
     let results = {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        compile::build_all(&cfg.template, &cfg.data, &src, &p.req.targets)
+        compile::build_all(&cfg.template, &cfg.data, &src, &p.req.targets, cfg.build_timeout)
     };
     let mut out = vec![results.len() as u8]; // <= 255: the request's target count is one byte
     for (t, r) in p.req.targets.iter().zip(results) {
@@ -342,10 +378,22 @@ mod tests {
         http(addr, &r)
     }
 
+    #[test]
+    fn data_dir_becomes_absolute() {
+        let rel = PathBuf::from(format!("target/bs-rel-{}", std::process::id()));
+        let abs = prepare_data_dir(&rel).unwrap();
+        assert!(abs.is_absolute() && abs.join("work").is_dir());
+        let _ = std::fs::remove_dir_all(&abs);
+    }
+
     fn start(data: &std::path::Path) -> std::net::SocketAddr {
+        start_with(data, DEFAULT_READ_DEADLINE)
+    }
+
+    fn start_with(data: &std::path::Path, read_deadline: Duration) -> std::net::SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
-        let cfg = Config { data: data.to_path_buf(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..") };
+        let cfg = Config { data: data.to_path_buf(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline };
         std::thread::spawn(move || serve(l, Arc::new(cfg)));
         addr
     }
@@ -355,6 +403,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("work")).unwrap();
         d
+    }
+
+    #[test]
+    fn slow_drip_hits_total_deadline() {
+        let data = tmp("drip");
+        let addr = start_with(&data, Duration::from_millis(600));
+        let mut s = TcpStream::connect(addr).unwrap();
+        let t = Instant::now();
+        // one byte every 200 ms: every single read is fast, only the total deadline can stop it
+        for b in b"POST /key HTTP/1.1\r\nContent-Length: 9\r\n" {
+            if s.write_all(&[*b]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let mut r = vec![];
+        let _ = s.read_to_end(&mut r);
+        assert!(String::from_utf8_lossy(&r).starts_with("HTTP/1.1 408"), "{}", String::from_utf8_lossy(&r));
+        assert!(t.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -391,7 +459,9 @@ mod tests {
     #[test]
     #[ignore = "slow: release-builds the executor"]
     fn e2e_build_host_target() {
-        let data = tmp("e2e");
+        // stable dir (kept after the test) so a second run shows the incremental build
+        let data = std::env::temp_dir().join("tunpak-bs-e2e-cache");
+        std::fs::create_dir_all(data.join("work")).unwrap();
         let addr = start(&data);
         let req = BuildRequest {
             version: 1,
@@ -420,8 +490,8 @@ mod tests {
         eprintln!("executor binary size: {} bytes", results[0].1.len());
         assert_eq!(results[1].0, 1);
         assert!(!results[1].1.is_empty());
-        // work dir is cleaned up
-        assert_eq!(std::fs::read_dir(data.join("work")).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&data);
+        // no distributor key stays in the work dir
+        let keys = "crates/tunpak-executor/src/generated_keys.rs";
+        assert_eq!(std::fs::read(data.join("work/src").join(keys)).unwrap(), std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(keys)).unwrap());
     }
 }

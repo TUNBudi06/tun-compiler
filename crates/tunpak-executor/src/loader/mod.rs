@@ -3,6 +3,7 @@ pub mod lib_load;
 pub mod run_exec;
 pub mod srv_load;
 
+use obfstr::obfstr as ob;
 use crate::platform::linux::{host_arch, host_platform};
 use crate::sandbox::{ChildGuard, Sandbox};
 use crate::vm::program::Program;
@@ -36,28 +37,32 @@ fn bad(msg: impl Into<String>) -> ExecError {
 impl<'a> Pak<'a> {
     /// `signed` must already have passed `verify::verify`; `key_id` is the key that verified it.
     pub fn load(signed: &'a [u8], key_id: Option<u8>, trust: &Trust, opts: &RunOptions) -> Result<Self, ExecError> {
-        let (hdr, _) = PakHeader::parse(signed).map_err(|e| bad(format!("bad pak header: {e}")))?;
+        let (hdr, _) = PakHeader::parse(signed).map_err(|e| bad(format!("{}{e}", ob!("bad pak header: "))))?;
         let dict_off = hdr.dict_offset as usize;
         if dict_off < PAK_HEADER_LEN || dict_off >= signed.len() {
-            return Err(bad("inconsistent pak: dict_offset outside the signed region"));
+            return Err(bad(ob!("inconsistent pak: dict_offset outside the signed region")));
         }
-        let (dict, _) = Dict::parse(&signed[dict_off..]).map_err(|e| bad(format!("bad dict: {e}")))?;
+        let (dict, _) = Dict::parse(&signed[dict_off..]).map_err(|e| bad(format!("{}{e}", ob!("bad dict: "))))?;
         let h = &dict.header;
         if let Some(id) = key_id {
             if h.pubkey_id != id {
-                return Err(bad(format!("pubkey_id mismatch: dict says {}, signature verified with key {id}", h.pubkey_id)));
+                return Err(bad(format!("{}{}{}{id}", ob!("pubkey_id mismatch: dict says "), h.pubkey_id, ob!(", signature verified with key "))));
             }
         }
         if trust.app_id.is_some_and(|a| a != h.app_id) {
-            return Err(bad("app_id mismatch: this pak belongs to a different application"));
+            return Err(bad(ob!("app_id mismatch: this pak belongs to a different application")));
         }
         if trust.author_id.is_some_and(|a| a != h.author_id) {
-            return Err(bad("author_id mismatch: this pak was built by a different distributor"));
+            return Err(bad(ob!("author_id mismatch: this pak was built by a different distributor")));
         }
         if h.min_exec_ver > EXECUTOR_VERSION {
             return Err(bad(format!(
-                "pak requires executor version {}, this is {}: update executor",
-                h.min_exec_ver, EXECUTOR_VERSION
+                "{}{}{}{}{}",
+                ob!("pak requires executor version "),
+                h.min_exec_ver,
+                ob!(", this is "),
+                EXECUTOR_VERSION,
+                ob!(": update executor")
             )));
         }
         let mut main_idx = None;

@@ -4,6 +4,7 @@
 pub mod local;
 pub mod server;
 
+use obfstr::obfstr as ob;
 use crate::{ExecError, RunOptions, Trust, EXIT_ERROR};
 use std::cell::RefCell;
 use tunpak_format::dict::DictHeader;
@@ -30,12 +31,12 @@ impl Drop for KeyCache {
 pub fn entry_key(h: &DictHeader, trust: &Trust, license: Option<&str>, cache: &KeyCache) -> Result<[u8; 32], ExecError> {
     // SPEC-GAP: Trust.key_mode 0 means "not pinned" (dev/test executors): only a mode-2 mismatch is refused there.
     match (h.key_mode, trust.key_mode) {
-        (KeyMode::Server, m) if m != 2 => return Err(refuse("pak uses key_mode 2 (key server) but this executor was not built for it")),
-        (KeyMode::Local, 2) => return Err(refuse("pak uses key_mode 1 (local key) but this executor was built for the key server")),
+        (KeyMode::Server, m) if m != 2 => return Err(refuse(ob!("pak uses key_mode 2 (key server) but this executor was not built for it"))),
+        (KeyMode::Local, 2) => return Err(refuse(ob!("pak uses key_mode 1 (local key) but this executor was built for the key server"))),
         _ => {}
     }
     match h.key_mode {
-        KeyMode::None => Err(refuse("entry is encrypted but the pak has key_mode 0")),
+        KeyMode::None => Err(refuse(ob!("entry is encrypted but the pak has key_mode 0"))),
         KeyMode::Local => local::key(trust, h.app_id),
         KeyMode::Server => {
             let mut slot = cache.0.borrow_mut();

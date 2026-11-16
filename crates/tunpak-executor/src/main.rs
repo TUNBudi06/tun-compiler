@@ -1,3 +1,5 @@
+use obfstr::obfstr as ob;
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let (mut dev, mut yes, mut license) = (false, false, None);
@@ -22,7 +24,7 @@ fn main() {
         std::process::exit(tunpak_executor::EXIT_MISUSE);
     }
     if dev && !tunpak_executor::dev_allowed(tunpak_executor::generated_keys::PUBKEYS) {
-        eprintln!("error: this executor was built for distribution: --dev is not available");
+        eprintln!("{}", ob!("error: this executor was built for distribution: --dev is not available"));
         std::process::exit(1);
     }
     let pak = args.remove(0);
