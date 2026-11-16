@@ -148,6 +148,10 @@ opcodes! {
     // cleanup
     OnExit = 0x00B0, "ON_EXIT";
     Nop = 0x00BF, "NOP";
+    // SPEC-GAP: spec/04 has `try { } catch { }` but spec/02 lists no opcode for it. These two
+    // are ADDED in free space next to ON_EXIT (2 bytes; no existing opcode changes meaning).
+    Try = 0x00B2, "TRY";
+    EndTry = 0x00B3, "END_TRY";
 }
 
 impl Opcode {

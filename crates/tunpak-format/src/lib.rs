@@ -16,9 +16,11 @@ pub mod identity;
 pub mod layout;
 pub mod libfn;
 pub mod opcodes;
+pub mod operands;
 pub mod pak;
 pub mod tun;
 pub mod types;
+pub mod tzst;
 pub mod varint;
 
 /// Clear errors over silent behavior (invariant 9).

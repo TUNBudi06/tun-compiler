@@ -9,6 +9,7 @@ pub mod disasm;
 pub mod errors;
 pub mod lexer;
 pub mod tun;
+pub mod tzst;
 
 pub use errors::CompileError;
 
@@ -34,4 +35,20 @@ pub fn compile_tun(src: &str, width: Width, resolve: Resolver) -> Result<TunOutp
 /// Disassemble a code section to one instruction per line (`inspect` + assemble↔disassemble tests).
 pub fn disassemble(code: &[u8], consts: &[Const], width: Width) -> Result<String, CompileError> {
     disasm::disassemble(code, consts, width)
+}
+
+/// Result of compiling one `.tzst` script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TzstOutput {
+    pub file: tunpak_format::tzst::TzstFile,
+    /// `NEED` declarations as permission-table rows (source order).
+    pub perms: Vec<Perm>,
+    /// Non-fatal diagnostics, e.g. "endian not set before typed read" (spec/05).
+    pub warnings: Vec<String>,
+}
+
+/// Compile `.tzst` source text. Operand encodings and stack contract:
+/// `tunpak_format::operands` (the single source of truth shared with the VM).
+pub fn compile_tzst(src: &str, width: Width) -> Result<TzstOutput, CompileError> {
+    tzst::compile(src, width)
 }
