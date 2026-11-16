@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use tunpak_format::types::{Arch, Platform};
 
 pub fn os() -> &'static str {
-    "linux"
+    if cfg!(target_os = "android") { super::termux::OS_NAME } else { "linux" }
 }
 pub fn osv() -> String {
     std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_string()).unwrap_or_default()
@@ -14,9 +14,9 @@ pub fn arch_name() -> &'static str {
 pub fn host_arch() -> Arch {
     if cfg!(target_arch = "aarch64") { Arch::Arm64 } else { Arch::X64 }
 }
-// SPEC-GAP: Termux (platform 2) detection is v3; every v0 host is treated as linux-glibc.
+// SPEC-GAP: Termux is detected at compile time (the android triples are what the build server uses).
 pub fn host_platform() -> Platform {
-    Platform::LinuxGlibc
+    if cfg!(target_os = "android") { Platform::Termux } else { Platform::LinuxGlibc }
 }
 pub fn user() -> String {
     std::env::var("USER").unwrap_or_default()

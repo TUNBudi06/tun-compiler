@@ -487,6 +487,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tunpak-buildserver"
+version = "0.1.0"
+dependencies = [
+ "tunpak-crypto",
+ "tunpak-format",
+]
+
+[[package]]
 name = "tunpak-crypto"
 version = "0.1.0"
 dependencies = [

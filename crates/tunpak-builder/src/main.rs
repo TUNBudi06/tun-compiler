@@ -2,19 +2,27 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
 
-use tunpak_builder::{dev, inspect::inspect, keys, libs, pack_module, write_atomic, BuildError, PackOptions};
+use tunpak_builder::{dev, distrib, inspect::inspect, keys, libs, pack_module, write_atomic, BuildError, PackOptions};
 use tunpak_format::types::Width;
 
-const USAGE: &str = "usage:
-  tunpak keygen [-o <dir>] [--force]
-  tunpak keygen --rotate -i <identity.tzid>
-  tunpak keygen --revoke <key id> -i <identity.tzid>
-  tunpak build <dir> -o <out.pak> [--identity <identity.tzid>] [--encrypt --master-key <master.key>]
-               [--compress] [--width 4|8] [--pak-version N] [--unsigned]
+const USAGE: &str = "usage (distributor first run, in order):
+  1. tunpak keygen [-o <dir>] [--force]
+     tunpak keygen --rotate -i <identity.tzid>
+     tunpak keygen --revoke <key id> -i <identity.tzid>
+  2. tunpak setup-server --url <http://host[:port]> -i <identity.tzid> [-o <dir>] [--cache-ttl SECS] [--force]   (key_mode 2 only)
+     tunpak setup-server --add-license -i <identity.tzid> [-o <dir>]
+  3. tunpak setup-user -i <identity.tzid> [--author-id N] [--name TEXT]
+  4. tunpak gen-generator -i <identity.tzid> -o <dir> [--key <id>]
+  5. tunpak gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>
+                         [--master-key <master.key> | --server-config <server.tsrv>]
+     targets: x64-linux, arm64-linux, x64-termux, arm64-termux
+other commands:
+  tunpak build <dir> -o <out.pak> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
+               [--compress] [--width 4|8] [--pak-version N (default 1)] [--unsigned]
+               (without --identity, an identity.tzid next to this tunpak binary is used)
   tunpak inspect <x.pak>
   tunpak lib-check <lib.so>
   tunpak dev run <path/to/main.tun | script.tzst> [-- args...]
-  tunpak setup-server | setup-user | gen-generator | gen-executor  (not implemented yet)
 passphrase: env TUNPAK_PASSPHRASE, else prompted on the terminal";
 
 fn fail(e: impl std::fmt::Display) -> ! {
@@ -62,8 +70,69 @@ fn passphrase(confirm: bool) -> Result<Vec<u8>, BuildError> {
     Ok(p.into_bytes())
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+use distrib::hex;
+
+/// Parse `--flag value` / boolean flags for the setup-*/gen-* commands.
+fn flags(args: &[String], valued: &[&str], bools: &[&str]) -> Result<std::collections::HashMap<String, String>, BuildError> {
+    let (mut m, mut it) = (std::collections::HashMap::new(), args.iter());
+    while let Some(a) = it.next() {
+        if bools.contains(&a.as_str()) {
+            m.insert(a.clone(), String::new());
+        } else if valued.contains(&a.as_str()) {
+            let v = it.next().ok_or_else(|| BuildError::Msg(format!("{a} needs a value")))?;
+            m.insert(a.clone(), v.clone());
+        } else {
+            return msg(format!("unexpected argument '{a}'"));
+        }
+    }
+    Ok(m)
+}
+fn num<T: std::str::FromStr>(m: &std::collections::HashMap<String, String>, k: &str) -> Result<Option<T>, BuildError> {
+    m.get(k).map(|v| v.parse().map_err(|_| BuildError::Msg(format!("{k} must be a number")))).transpose()
+}
+
+fn setup_server(args: &[String]) -> Result<(), BuildError> {
+    let m = flags(args, &["--url", "-i", "-o", "--cache-ttl"], &["--add-license", "--force"])?;
+    let Some(id) = m.get("-i") else { return msg("setup-server needs -i <identity.tzid>") };
+    let dir = PathBuf::from(m.get("-o").map_or(".", String::as_str));
+    if m.contains_key("--add-license") {
+        println!("{}", distrib::add_license(Path::new(id), &dir)?);
+        eprintln!("license printed once above; only its sha256 is stored (server-data/.../licenses). Give it to the user.");
+        return Ok(());
+    }
+    let Some(url) = m.get("--url") else { return msg("setup-server needs --url <http://host[:port]>") };
+    let app = distrib::setup_server(Path::new(id), url, &dir, num(&m, "--cache-ttl")?, m.contains_key("--force"))?;
+    println!("wrote {}", dir.join("server.tsrv").display());
+    println!("wrote {} (master.key, licenses)", app.display());
+    println!("copy {} to the key server's data dir (apps/<app_id>/). master.key must stay on the server and never ship to users.", dir.join("server-data").display());
+    Ok(())
+}
+
+fn setup_user(args: &[String]) -> Result<(), BuildError> {
+    let m = flags(args, &["-i", "--author-id", "--name"], &[])?;
+    let Some(id) = m.get("-i") else { return msg("setup-user needs -i <identity.tzid>") };
+    print!("{}", distrib::setup_user(Path::new(id), num(&m, "--author-id")?, m.get("--name").map(String::as_str))?);
+    Ok(())
+}
+
+fn gen_generator(args: &[String]) -> Result<(), BuildError> {
+    let m = flags(args, &["-i", "-o", "--key"], &[])?;
+    let (Some(id), Some(out)) = (m.get("-i"), m.get("-o")) else { return msg("usage: tunpak gen-generator -i <identity.tzid> -o <dir> [--key <id>]") };
+    distrib::gen_generator(Path::new(id), Path::new(out), num(&m, "--key")?)?;
+    println!("wrote {out}/tunpak and {out}/identity.tzid (private key still passphrase-encrypted)");
+    Ok(())
+}
+
+/// Returns the process exit code.
+fn gen_executor(args: &[String]) -> Result<i32, BuildError> {
+    let m = flags(args, &["-i", "--server", "--target", "-o", "--master-key", "--server-config"], &[])?;
+    let (Some(id), Some(server), Some(t), Some(out)) = (m.get("-i"), m.get("--server"), m.get("--target"), m.get("-o")) else {
+        return msg("usage: tunpak gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>");
+    };
+    let master = m.get("--master-key").map(|p| keys::read_master_key(Path::new(p))).transpose()?;
+    let tsrv = m.get("--server-config").map(|p| std::fs::read(p).map_err(|e| BuildError::Io(format!("cannot read {p}: {e}")))).transpose()?;
+    let ok = distrib::gen_executor(Path::new(id), server, distrib::parse_targets(t)?, Path::new(out), master, tsrv)?;
+    Ok(if ok { 0 } else { 1 })
 }
 
 fn keygen(args: &[String]) -> Result<(), BuildError> {
@@ -100,7 +169,8 @@ fn keygen(args: &[String]) -> Result<(), BuildError> {
 }
 
 fn build(args: &[String]) -> Result<(), BuildError> {
-    let (mut dir, mut out, mut o) = (None, None, PackOptions::default());
+    let (mut dir, mut out, mut o) = (None, None, PackOptions { pak_version: 1, ..Default::default() });
+    let mut server_config = None;
     let (mut identity, mut master, mut unsigned, mut encrypt) = (None, None, false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -110,6 +180,7 @@ fn build(args: &[String]) -> Result<(), BuildError> {
             "--identity" => identity = Some(v("--identity")?),
             "--master-key" => master = Some(v("--master-key")?),
             "--encrypt" => encrypt = true,
+            "--server-config" => server_config = Some(v("--server-config")?),
             "--compress" => o.compress = true,
             "--unsigned" => unsigned = true,
             "--pak-version" => o.pak_version = v("--pak-version")?.parse().map_err(|_| BuildError::Msg("--pak-version must be a number".into()))?,
@@ -128,15 +199,29 @@ fn build(args: &[String]) -> Result<(), BuildError> {
     if encrypt {
         let Some(m) = master else { return msg("--encrypt needs --master-key <file>") };
         o.master_key = Some(keys::read_master_key(Path::new(&m))?);
-    } else if master.is_some() {
-        return msg("--master-key given without --encrypt");
+    } else if master.is_some() || server_config.is_some() {
+        return msg("--master-key / --server-config given without --encrypt");
     }
+    // a generated builder carries its key: identity.tzid next to this executable
+    let identity = identity.or_else(|| {
+        let p = std::env::current_exe().ok()?.with_file_name("identity.tzid");
+        (!unsigned && p.is_file()).then(|| p.to_string_lossy().into_owned())
+    });
     match identity {
         Some(_) if unsigned => return msg("--identity and --unsigned are mutually exclusive"),
         Some(i) => {
             let id = keys::load_identity(Path::new(&i))?;
+            if let Some(sc) = &server_config {
+                let b = std::fs::read(sc).map_err(|e| BuildError::Io(format!("cannot read {sc}: {e}")))?;
+                let (cfg, used) = tunpak_format::config::ServerConfig::parse(&b)?;
+                if used != b.len() || cfg.app_id != id.app_id {
+                    return msg(format!("{sc}: server config is for app_id {}, identity has {}", cfg.app_id, id.app_id));
+                }
+                o.key_mode = tunpak_format::types::KeyMode::Server;
+            }
             o.sign = Some(keys::signing_key(&id, &passphrase(false)?)?);
         }
+        None if server_config.is_some() => return msg("--server-config needs an identity (app_id must match)"),
         None if unsigned => eprintln!("warning: unsigned pak — only a --dev executor will run it"),
         None => return msg("no --identity given; pass --identity <identity.tzid> to sign, or --unsigned for a dev-only pak"),
     }
@@ -185,10 +270,10 @@ fn main() {
             print!("{}", inspect(&bytes).unwrap_or_else(|e| fail(e)));
         }
         Some("dev") if args.get(1).map(String::as_str) == Some("run") && args.len() > 2 => exit(dev_run(&args[2..])),
-        Some("setup-server" | "setup-user" | "gen-generator" | "gen-executor") => {
-            eprintln!("not implemented yet (milestone v3)");
-            exit(2)
-        }
+        Some("setup-server") => setup_server(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("setup-user") => setup_user(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("gen-generator") => gen_generator(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("gen-executor") => exit(gen_executor(&args[1..]).unwrap_or_else(|e| fail(e))),
         Some(_) => {
             eprintln!("{USAGE}");
             exit(2)

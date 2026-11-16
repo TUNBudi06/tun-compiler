@@ -28,7 +28,12 @@ pub fn trust_for(k: &Keys, id: u8, master: Option<[u8; 32]>) -> Trust {
         author_id: Some(AUTHOR),
         keys: vec![TrustedKey { id, public: k.pk, revoked: false }],
         master_key: master,
+        ..Default::default()
     }
+}
+/// Trust of a key_mode-2 executor pointing at `url`.
+pub fn trust_server(k: &Keys, id: u8, url: &str) -> Trust {
+    Trust { key_mode: 2, server_url: Some(url.into()), ..trust_for(k, id, None) }
 }
 
 /// One entry as the test author describes it.
@@ -248,4 +253,44 @@ pub fn tmpdir(name: &str) -> std::path::PathBuf {
 
 pub fn parts(p: &[Src]) -> Arg {
     Arg::Parts(p.to_vec())
+}
+
+/// Fake key server on 127.0.0.1:0. `reply` gets (app_id, license) and returns (status, body).
+pub struct FakeKeyServer {
+    pub url: String,
+    pub hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+pub fn fake_key_server(reply: impl Fn(u32, &[u8]) -> (u16, Vec<u8>) + Send + 'static) -> FakeKeyServer {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/base", l.local_addr().unwrap());
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h = hits.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut raw = vec![];
+            let mut buf = [0u8; 1024];
+            let body = loop {
+                let n = c.read(&mut buf).unwrap_or(0);
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&raw[..p]).to_lowercase();
+                    assert!(head.starts_with("post /base/key http/1.1"), "{head}");
+                    let cl: usize = head.split("content-length:").nth(1).unwrap().lines().next().unwrap().trim().parse().unwrap();
+                    if raw.len() >= p + 4 + cl {
+                        break raw[p + 4..p + 4 + cl].to_vec();
+                    }
+                }
+                if n == 0 {
+                    break vec![0; 4];
+                }
+            };
+            let (st, b) = reply(u32::from_le_bytes(body[..4].try_into().unwrap()), &body[4..]);
+            let _ = write!(c, "HTTP/1.1 {st} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len());
+            let _ = c.write_all(&b);
+        }
+    });
+    FakeKeyServer { url, hits }
 }

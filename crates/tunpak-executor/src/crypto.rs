@@ -2,10 +2,11 @@
 //! sha256(stored bytes) == entry.hash  ->  decrypt  ->  decompress  ->  length == orig_size.
 //! The hash check ALWAYS precedes decrypt: a forged/altered entry is rejected without using a key.
 use crate::{ExecError, Trust, EXIT_ERROR};
+use crate::keysource::{self, KeyCache};
 use tunpak_crypto::{compress, encrypt, hash, hkdf};
 use tunpak_format::dict::{DictHeader, Entry};
 use tunpak_format::layout::{TUN_HEADER_LEN, TUN_OFF_FLAGS};
-use tunpak_format::types::{EntryType, KeyMode, ENTRY_COMPRESSED, ENTRY_ENCRYPTED, TUN_COMPRESSED, TUN_ENCRYPTED};
+use tunpak_format::types::{EntryType, ENTRY_COMPRESSED, ENTRY_ENCRYPTED, TUN_COMPRESSED, TUN_ENCRYPTED};
 
 fn refuse(msg: impl Into<String>) -> ExecError {
     ExecError::new(EXIT_ERROR, msg)
@@ -21,7 +22,7 @@ pub fn check_hash(e: &Entry, stored: &[u8]) -> Result<(), ExecError> {
 }
 
 /// Full pipeline for one entry; returns the original bytes.
-pub fn open_entry(e: &Entry, stored: &[u8], h: &DictHeader, trust: &Trust) -> Result<Vec<u8>, ExecError> {
+pub fn open_entry(e: &Entry, stored: &[u8], h: &DictHeader, trust: &Trust, license: Option<&str>, cache: &KeyCache) -> Result<Vec<u8>, ExecError> {
     check_hash(e, stored)?;
     let (compressed, encrypted) = (e.flags & ENTRY_COMPRESSED != 0, e.flags & ENTRY_ENCRYPTED != 0);
     // SPEC-GAP: spec/01 §1 keeps the 12-byte main.tun header in the clear even when the body is
@@ -47,15 +48,8 @@ pub fn open_entry(e: &Entry, stored: &[u8], h: &DictHeader, trust: &Trust) -> Re
         .ok_or_else(|| refuse(format!("entry '{}': orig_size smaller than its header", e.path)))?;
     let mut data: Vec<u8> = body.to_vec();
     if encrypted {
-        let key = match h.key_mode {
-            KeyMode::None => return Err(refuse(format!("entry '{}' is encrypted but the pak has key_mode 0", e.path))),
-            KeyMode::Local => {
-                let master = trust.master_key.as_ref().ok_or_else(|| refuse("this executor has no key for encrypted paks"))?;
-                hkdf::derive_entry_key(master, h.app_id)
-            }
-            // TODO(v3): fetch the key from the endpoint in generated_keys::SERVER_URL.
-            KeyMode::Server => return Err(refuse("key_mode 2 (server) is not available in this build")),
-        };
+        let key = keysource::entry_key(h, trust, license, cache)
+            .map_err(|err| refuse(format!("entry '{}': {}", e.path, err.msg)))?;
         let aad = hkdf::entry_aad(h.app_id, e.ref_id, e.entry_type.into());
         data = encrypt::decrypt(&key, &e.nonce, &aad, &data)
             .map_err(|err| refuse(format!("entry '{}': {err}", e.path)))?;

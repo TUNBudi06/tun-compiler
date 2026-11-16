@@ -860,12 +860,27 @@ impl P<'_> {
                 lit.push(c);
                 i += 2;
             } else if c == '{' {
-                let (mut depth, mut j, mut inq) = (1, i + 1, false);
+                // Quote forms inside `{...}`: plain `"a\"b"` (escapes kept for the lexer) and the older
+                // `\"k\"` form (every `\"` is a quote). `q`: 0 outside a string, 1 plain, 2 `\"`-delimited.
+                // SPEC-GAP: a `\"` outside a string is read as the older form's opening quote.
+                let (mut depth, mut j, mut q, mut inner) = (1, i + 1, 0u8, String::new());
                 while j < cs.len() {
-                    match cs[j] {
-                        '"' => inq = !inq,
-                        '{' if !inq => depth += 1,
-                        '}' if !inq => {
+                    let esc_q = cs[j] == '\\' && cs.get(j + 1) == Some(&'"');
+                    match (cs[j], q) {
+                        _ if esc_q && q != 1 => {
+                            q = if q == 0 { 2 } else { 0 };
+                            inner.push('"');
+                            j += 2;
+                            continue;
+                        }
+                        ('\\', 1) if j + 1 < cs.len() => {
+                            inner.push('\\');
+                            j += 1;
+                        }
+                        ('"', 0) => q = 1,
+                        ('"', 1) => q = 0,
+                        ('{', 0) => depth += 1,
+                        ('}', 0) => {
                             depth -= 1;
                             if depth == 0 {
                                 break;
@@ -873,12 +888,12 @@ impl P<'_> {
                         }
                         _ => {}
                     }
+                    inner.push(cs[j]);
                     j += 1;
                 }
                 if j >= cs.len() {
                     return Err(err(t, "unterminated '{' in f-string"));
                 }
-                let inner: String = cs[i + 1..j].iter().collect::<String>().replace("\\\"", "\"");
                 let mut toks = lex(&inner).map_err(|e| err(t, format!("in f-string: {}", e.msg)))?;
                 toks.iter_mut().for_each(|k| (k.line, k.col) = (t.line, t.col));
                 let mut sub = P { toks, pos: 0, src: self.src };

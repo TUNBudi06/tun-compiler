@@ -54,6 +54,7 @@ fn trust(id: &Id, with_master: bool) -> Trust {
         author_id: Some(id.id.author_id),
         keys: id.id.keys.iter().map(|k| TrustedKey { id: k.id, public: k.public_key, revoked: k.status != 0 }).collect(),
         master_key: with_master.then_some(id.master),
+        ..Default::default()
     }
 }
 fn opts(id: &Id, compress: bool, encrypt: bool) -> PackOptions {

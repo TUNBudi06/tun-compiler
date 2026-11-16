@@ -19,9 +19,10 @@ impl Sandbox {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
+        let base = crate::platform::tmp_base().map_err(|m| ExecError::new(EXIT_ERROR, m))?;
         for _ in 0..16 {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("tunpak-{}-{nanos:x}-{n}", std::process::id()));
+            let dir = base.join(format!("tunpak-{}-{nanos:x}-{n}", std::process::id()));
             match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
                 Ok(()) => return Ok(Sandbox { dir }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

@@ -317,7 +317,7 @@ fn wrong_master_key_and_missing_key_and_server_mode() {
     assert!(run(&pak, &base_opts(trust_for(&k, 1, None)), "").err_msg().contains("no key for encrypted paks"));
     let cfg = Cfg { key_mode: KeyMode::Server, ..cfg };
     let pak = build(exit7(), vec![], &cfg);
-    assert!(run(&pak, &base_opts(trust_for(&k, 1, Some([9; 32]))), "").err_msg().contains("key_mode 2 (server) is not available"));
+    assert!(run(&pak, &base_opts(trust_for(&k, 1, Some([9; 32]))), "").err_msg().contains("not built for it"));
     // key_mode 0 + an encrypted entry
     let cfg = Cfg { key_mode: KeyMode::None, master: Some([9; 32]), main_encrypt: true, ..signed(&k) };
     let pak = build(exit7(), vec![], &cfg);

@@ -378,8 +378,9 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
         return msg(format!("too many permission rows: {} (max {MAX_PERMS})", table.len()));
     }
 
-    let key_mode = if opts.master_key.is_some() { KeyMode::Local } else { opts.key_mode };
-    if key_mode == KeyMode::Local && opts.master_key.is_none() {
+    // key_mode 2 encrypts exactly like 1 (HKDF(master, app_id)); only where the key lives differs.
+    let key_mode = if opts.master_key.is_some() && opts.key_mode != KeyMode::Server { KeyMode::Local } else { opts.key_mode };
+    if key_mode != KeyMode::None && opts.master_key.is_none() {
         return msg("key_mode local needs a master key");
     }
     let mut blob = Vec::new();

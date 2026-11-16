@@ -47,7 +47,7 @@ pub fn load_identity(path: &Path) -> Result<Identity, BuildError> {
     Ok(id)
 }
 
-fn save_identity(path: &Path, id: &Identity) -> Result<(), BuildError> {
+pub fn save_identity(path: &Path, id: &Identity) -> Result<(), BuildError> {
     let mut b = Vec::new();
     id.serialize(&mut b)?;
     write_atomic_mode(path, &b, Some(0o600))

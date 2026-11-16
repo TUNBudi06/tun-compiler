@@ -4,6 +4,7 @@
 
 pub mod crypto;
 pub mod generated_keys;
+pub mod keysource;
 pub mod loader;
 pub mod perm;
 pub mod platform;
@@ -40,6 +41,8 @@ pub struct RunOptions {
     pub assume_yes: bool,
     /// Force `$TERM_COLOR` (default: detect). Mainly for tests.
     pub term_color: Option<bool>,
+    /// key_mode 2 license text (`--license` / env `TUNPAK_LICENSE`).
+    pub license: Option<String>,
 }
 
 /// One trusted signing key (spec/06 rotation + revocation).
@@ -57,6 +60,10 @@ pub struct Trust {
     pub author_id: Option<u32>,
     pub keys: Vec<TrustedKey>,
     pub master_key: Option<[u8; 32]>,
+    /// 0 = unpinned/none, 1 = local, 2 = server (what this executor was built for).
+    pub key_mode: u8,
+    /// key_mode 2 endpoint (`http://host[:port][/base]`).
+    pub server_url: Option<String>,
 }
 
 impl Trust {
@@ -67,7 +74,9 @@ impl Trust {
             app_id: g::APP_ID,
             author_id: g::AUTHOR_ID,
             keys: g::PUBKEYS.iter().map(|&(id, public, revoked)| TrustedKey { id, public, revoked }).collect(),
-            master_key: g::MASTER_KEY,
+            master_key: g::master_key(),
+            key_mode: g::KEY_MODE,
+            server_url: Some(g::server_url()).filter(|u| !u.is_empty()),
         }
     }
 }
@@ -192,3 +201,17 @@ fn run_inner(pak: &[u8], opts: &RunOptions) -> Result<(i32, i32), ExecError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Dev mode is a property of the build: only an executor with no compiled-in trusted keys may run unsigned input.
+pub fn dev_allowed(trusted_keys: &[(u8, [u8; 32], bool)]) -> bool {
+    trusted_keys.is_empty()
+}
+
+#[cfg(test)]
+mod dev_gate_tests {
+    #[test]
+    fn dev_only_without_keys() {
+        assert!(super::dev_allowed(&[]));
+        assert!(!super::dev_allowed(&[(1, [0; 32], false)]));
+    }
+}

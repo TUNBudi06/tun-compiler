@@ -1,0 +1,16 @@
+[package]
+name = "tunpak-buildserver"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "tunpak_buildserver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tunpak-buildserver"
+path = "src/main.rs"
+
+[dependencies]
+tunpak-format = { path = "../crates/tunpak-format" }
+tunpak-crypto = { path = "../crates/tunpak-crypto" }

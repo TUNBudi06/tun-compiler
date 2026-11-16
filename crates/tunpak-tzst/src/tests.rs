@@ -464,6 +464,16 @@ fn fstring_nested_string_and_braces() {
 }
 
 #[test]
+fn fstring_escaped_quote_in_nested_string() {
+    for src in [
+        r#"start { print f"x={"a\"b"}"; }"#,
+        r#"start { let @o = {"k": 1}; print f"{@o["k"]}"; print f"{@o[\"k\"]}"; }"#,
+    ] {
+        sane(&ok(src), Width::W4);
+    }
+}
+
+#[test]
 fn multi_level_index_assign() {
     let o = ok("start { let @a = [[1, 2], [3, 4]]; @a[1][0] = 9; let @o = {\"k\": [1]}; @o[\"k\"][0] = 5; @a[0][1] = @a[1][0]; }");
     sane(&o, Width::W4);

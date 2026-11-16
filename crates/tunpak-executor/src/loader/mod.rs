@@ -25,6 +25,8 @@ pub struct Pak<'a> {
     pub dict: Dict,
     main_idx: usize,
     trust: Trust,
+    license: Option<String>,
+    keys: crate::keysource::KeyCache,
 }
 
 fn bad(msg: impl Into<String>) -> ExecError {
@@ -33,7 +35,7 @@ fn bad(msg: impl Into<String>) -> ExecError {
 
 impl<'a> Pak<'a> {
     /// `signed` must already have passed `verify::verify`; `key_id` is the key that verified it.
-    pub fn load(signed: &'a [u8], key_id: Option<u8>, trust: &Trust, _opts: &RunOptions) -> Result<Self, ExecError> {
+    pub fn load(signed: &'a [u8], key_id: Option<u8>, trust: &Trust, opts: &RunOptions) -> Result<Self, ExecError> {
         let (hdr, _) = PakHeader::parse(signed).map_err(|e| bad(format!("bad pak header: {e}")))?;
         let dict_off = hdr.dict_offset as usize;
         if dict_off < PAK_HEADER_LEN || dict_off >= signed.len() {
@@ -73,7 +75,7 @@ impl<'a> Pak<'a> {
             }
         }
         let main_idx = main_idx.ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, "pak has no main.tun entry"))?;
-        Ok(Pak { signed, dict, main_idx, trust: trust.clone() })
+        Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default() })
     }
 
     pub fn entry(&self, r: u64) -> Option<&Entry> {
@@ -102,7 +104,7 @@ impl<'a> Pak<'a> {
     }
     /// The entry's original bytes: hash -> decrypt -> decompress -> size check (spec/01).
     pub fn data(&self, e: &Entry) -> Result<Vec<u8>, ExecError> {
-        crypto::open_entry(e, self.stored(e), &self.dict.header, &self.trust)
+        crypto::open_entry(e, self.stored(e), &self.dict.header, &self.trust, self.license.as_deref(), &self.keys)
     }
     pub fn tun(&self) -> Result<TunFile, ExecError> {
         let e = &self.dict.entries[self.main_idx];
