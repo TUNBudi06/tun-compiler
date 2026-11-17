@@ -3,6 +3,9 @@ name = "exectzs"
 version.workspace = true
 edition.workspace = true
 
+[features]
+bench-stats = []
+
 [dependencies]
 quicktzs-format = { path = "../quicktzs-format" }
 quicktzs-crypto = { path = "../quicktzs-crypto" }

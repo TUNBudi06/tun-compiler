@@ -35,3 +35,7 @@ impl From<ExecError> for Fault {
 }
 
 pub type R<T> = Result<T, Fault>;
+
+/// Executed-instruction counter for `examples/bench` (feature `bench-stats`, off by default, compiled out).
+#[cfg(feature = "bench-stats")]
+pub static STEPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

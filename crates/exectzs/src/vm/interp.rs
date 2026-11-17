@@ -538,6 +538,8 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         let Some(insn) = prog.insns.get(self.pc) else { return Ok(Some(0)) };
         self.cur_off = off;
+        #[cfg(feature = "bench-stats")]
+        crate::vm::STEPS.store(crate::vm::STEPS.load(std::sync::atomic::Ordering::Relaxed) + 1, std::sync::atomic::Ordering::Relaxed);
         self.budget = self.budget.saturating_sub(1);
         if self.budget == 0 {
             self.budget = TICK;

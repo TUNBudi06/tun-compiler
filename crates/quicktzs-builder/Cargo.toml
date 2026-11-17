@@ -9,6 +9,9 @@ quicktzs-crypto = { path = "../quicktzs-crypto" }
 quicktzs-tzst = { path = "../quicktzs-tzst" }
 exectzs = { path = "../exectzs" }
 
+[features]
+bench-stats = ["exectzs/bench-stats"]
+
 [[bin]]
 name = "quicktzs"
 path = "src/main.rs"
