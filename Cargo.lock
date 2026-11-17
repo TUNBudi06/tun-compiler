@@ -367,6 +367,7 @@ name = "quicktzs-builder"
 version = "0.1.0"
 dependencies = [
  "exectzs",
+ "libc",
  "quicktzs-crypto",
  "quicktzs-format",
  "quicktzs-tzst",

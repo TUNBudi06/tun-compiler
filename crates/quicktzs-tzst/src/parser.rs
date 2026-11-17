@@ -259,6 +259,8 @@ struct P<'a> {
     src: &'a str,
     depth: usize,
     nest: usize,
+    /// names of this file's own `fn`s (pre-scanned): they win over built-in names when called with `(`
+    user_fns: std::collections::HashSet<String>,
 }
 
 // Debug-build parser frames cost ~25KB per paren/block level, so nesting is capped low; the
@@ -267,11 +269,21 @@ const MAX_NEST: usize = 64;
 const MAX_TREE: usize = 200;
 
 pub fn parse(src: &str) -> Res<Program> {
-    let mut p = P { toks: lex(src)?, pos: 0, src, depth: 0, nest: 0 };
+    let toks = lex(src)?;
+    let user_fns = toks.windows(2).filter_map(|w| match (&w[0].tok, &w[1].tok) {
+        (Tok::Ident(f), Tok::Ident(n)) if f == "fn" => Some(n.clone()),
+        _ => None,
+    });
+    let mut p = P { user_fns: user_fns.collect(), toks, pos: 0, src, depth: 0, nest: 0 };
     p.program()
 }
 
 impl P<'_> {
+    /// Built-in names are soft keywords: `name(` with a user `fn name` in this file is a normal call.
+    fn user_call(&self, name: &str) -> bool {
+        self.user_fns.contains(name) && matches!(self.peek_at(0), Some(Tok::Punct("(")))
+    }
+
     fn eof_err(&self) -> CompileError {
         let (l, c) = self.toks.last().map_or((1, 1), |t| (t.line, t.col));
         CompileError::new(l, c, "unexpected end of input")
@@ -553,18 +565,18 @@ impl P<'_> {
                             _ => return Err(err(&a, "endian expects little or big")),
                         }
                     }
-                    "write" => {
+                    "write" if !self.user_call(kw) => {
                         let b = self.operand()?;
                         self.expect("->")?;
                         let d = self.operand()?;
                         SK::Write(b, d, self.operand()?)
                     }
-                    "append" => {
+                    "append" if !self.user_call(kw) => {
                         let b = self.operand()?;
                         self.expect("->")?;
                         SK::Append(b, self.operand()?)
                     }
-                    "lwrite" => {
+                    "lwrite" if !self.user_call(kw) => {
                         let b = self.operand()?;
                         self.expect("->")?;
                         let d = self.operand()?;
@@ -619,7 +631,7 @@ impl P<'_> {
                     "import" => return Err(err(&t, "imports are only allowed at top level, before 'fn' and 'start'")),
                     "elif" | "else" => return Err(err(&t, format!("'{kw}' without a matching 'if'"))),
                     "fn" | "start" | "NEED" => return Err(err(&t, format!("'{kw}' is only allowed at top level"))),
-                    _ if Pre::lookup(kw).is_some() || matches!(self.peek_at(0), Some(Tok::Punct("(" | "."))) => {
+                    _ if Pre::lookup(kw).is_some() || self.user_call(kw) || matches!(self.peek_at(0), Some(Tok::Punct("(" | "."))) => {
                         self.pos -= 1;
                         SK::Expr(self.expr()?)
                     }
@@ -895,7 +907,7 @@ impl P<'_> {
                     }
                     return Ok(Expr { k: EK::LibCall(name.clone(), fname, args), pos });
                 }
-                if let Some((pre, n)) = Pre::lookup(name) {
+                if let Some((pre, n)) = Pre::lookup(name).filter(|_| !self.user_call(name)) {
                     let mut args = vec![];
                     for _ in 0..n {
                         args.push(self.operand()?);
@@ -991,7 +1003,7 @@ impl P<'_> {
                 }
                 let mut toks = lex(&inner).map_err(|e| err(t, format!("in f-string: {}", e.msg)))?;
                 toks.iter_mut().for_each(|k| (k.line, k.col) = (t.line, t.col));
-                let mut sub = P { toks, pos: 0, src: self.src, depth: self.depth, nest: self.nest };
+                let mut sub = P { user_fns: self.user_fns.clone(), toks, pos: 0, src: self.src, depth: self.depth, nest: self.nest };
                 let e = sub.expr().map_err(|e| err(t, format!("in f-string: {}", e.msg)))?;
                 if sub.pos != sub.toks.len() {
                     return Err(err(t, "unexpected token in f-string {...}"));

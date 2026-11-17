@@ -236,6 +236,7 @@ fn build(args: &[String]) -> Result<(), BuildError> {
 }
 
 fn dev_run(args: &[String]) -> i32 {
+    exectzs::sandbox::install_signal_cleanup(); // only here: other subcommands keep default signals
     let main = PathBuf::from(&args[0]);
     let rest: Vec<String> = args[1..].iter().skip_while(|a| *a == "--").cloned().collect();
     let opts = exectzs::RunOptions { dev: true, assume_yes: true, args: rest, ..Default::default() };

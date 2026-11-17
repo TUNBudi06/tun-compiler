@@ -315,3 +315,11 @@ runtime error, timeout, SIGINT/SIGTERM/SIGHUP or panic the temps are removed and
 untouched. At most 64 paths may be staged at once. While a path is staged, `write`/`lwrite` to it
 fail with `append in progress on '<path>'`; `read`/`fsize`/`findloc` keep seeing the OLD file until the
 commit.
+
+## Soft keywords
+
+Built-in names (the prefix ops `fsize`, `findloc`, `read`, `split`, ... and the statements `write`,
+`append`, `lwrite`) are soft keywords: a script's own `fn` of the same name wins when called with
+parentheses (`name(...)`). Without a same-file `fn` of that name, or without the `(`, the built-in
+form applies. `fn <name>` definitions with these names are always allowed. Only the same file is
+consulted; imported fns are called as `alias.name(...)` and never clash. New built-ins inherit this.

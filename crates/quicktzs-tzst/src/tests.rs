@@ -569,3 +569,31 @@ fn decimal_literal_out_of_i64_is_an_error() {
     assert!(c("start { print 18446744073709551615; }").is_err());
     ok("start { print 9223372036854775807; print 0xFFFFFFFFFFFFFFFF; }");
 }
+
+// ---- soft keywords: a script's own fn named like a built-in wins when called with `(`
+
+#[test]
+fn soft_keyword_user_fns_match_renamed_bytes() {
+    // (clashing name, renamed, caller body using it, built-in-free)
+    for (name, body) in [
+        ("fsize", "let @r = {n}(@p, @p);"),
+        ("append", "let @r = {n}(@p, @p);"),
+        ("append", "{n}(@p, @p);"),
+        ("write", "{n}(@p, @p);"),
+        ("lwrite", "{n}(@p, @p);"),
+        ("findloc", "let @r = {n}(@p, @p);"),
+    ] {
+        let src = |n: &str| format!("fn {n}(@a, @b) -> @r {{ return @a; }}\nstart {{ let @p = \"x\"; {} }}", body.replace("{n}", n));
+        let (a, b) = (ok(&src(name)), ok(&src(&format!("my{name}"))));
+        assert_eq!(a.file.tun.code, b.file.tun.code, "{name}");
+        assert_eq!(a.file.tun.consts, b.file.tun.consts, "{name}");
+    }
+}
+
+#[test]
+fn soft_keyword_builtin_still_used_without_user_fn() {
+    let o = ok("NEED write \"/d\";\nstart { let @p = \"/d/f\"; append \"x\" -> @p; let @n = fsize @p; }");
+    assert!(disassemble(&o.file.tun.code, &o.file.tun.consts, Width::W4).unwrap().contains("FILE_SIZE"));
+    // a user fn elsewhere does not turn the unparenthesised built-in form into a call
+    ok("NEED write \"/d\";\nfn append(@a, @b) { return; }\nstart { let @p = \"/d/f\"; append \"x\" -> @p; }");
+}

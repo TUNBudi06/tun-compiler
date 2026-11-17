@@ -16,3 +16,6 @@ path = "src/main.rs"
 [lib]
 name = "quicktzs_builder"
 path = "src/lib.rs"
+
+[dev-dependencies]
+libc = "0.2"

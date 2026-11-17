@@ -413,6 +413,22 @@ pub struct Appends(Vec<Staged>);
 
 pub const MAX_STAGED: usize = 64;
 
+/// Remove every temp first, then the created dirs (deduped, deepest first): two appends in one new
+/// dir would otherwise leave it behind (the first dir removal sees the second temp still inside).
+impl Drop for Appends {
+    fn drop(&mut self) {
+        let mut dirs = Vec::new();
+        for s in &mut self.0 {
+            let _ = std::fs::remove_file(&s.tmp);
+            crate::sandbox::untrack_tmp(&s.tmp);
+            dirs.append(&mut s.dirs);
+        }
+        dirs.sort_by_key(|d| d.components().count());
+        dirs.dedup();
+        rm_dirs(&dirs);
+    }
+}
+
 impl Appends {
     pub fn has(&self, p: &Path) -> bool {
         self.0.iter().any(|s| s.path == p)
@@ -503,6 +519,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn two_discarded_appends_in_new_dir_remove_it() {
+        let d = dir("two_app");
+        let mut a = Appends::default();
+        a.append(&d.join("new/a.bin"), "a", b"x", dl()).unwrap();
+        a.append(&d.join("new/b.bin"), "b", b"y", dl()).unwrap();
+        drop(a);
+        assert!(!d.join("new").exists());
     }
 
     #[test]

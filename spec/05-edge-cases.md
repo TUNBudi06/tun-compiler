@@ -149,3 +149,7 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | nesting deeper than the cap (parens / `[` / `if` blocks: 64 levels; expression tree incl. flat `1+1+...` chains and unary runs: 200) | compile error `nesting too deep (max N)` with line, never a crash; main.tun `if` blocks capped at 64 |
 | `-o` target dir has a planted symlink at a guessable temp name | ignored: temp is `<path>.tmp.<pid>.<random>`, created O_EXCL; the symlink target is untouched |
 | `std/regex` huge character class repeated | class cost is charged to the step budget: `regex too complex` quickly |
+| `fn append(@a, @b) {...}` (or `fsize`, `findloc`, `write`, `lwrite`) defined, then `append(@x, @y)` called (expression or statement) | compiles to a normal user fn call, bytes identical to the same script with a non-clashing fn name |
+| built-in name with no same-file `fn` of that name, or a user `fn append` exists but the use is `append <expr> -> <path>;` (no `(`) | built-in form (`APPEND` / `FILE_SIZE` ...) |
+| `quicktzs dev run` receives SIGTERM/SIGINT/SIGHUP mid-`lwrite`/`write`/`append` | exit 143/130/129, temps and created dirs removed, target unchanged (same cleanup as `exectzs`) |
+| two staged appends into the same newly created dir, then error/discard | both temps and the created dir are removed |

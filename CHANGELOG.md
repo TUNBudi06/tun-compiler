@@ -4,6 +4,18 @@ All changes to QuickTZS (formerly TunPak), newest first. The project has no rele
 Each entry names the commit it came from. "Compatibility" notes list anything that changes how
 existing modules build or run.
 
+## 2026-11-18
+
+### Fixed: soft keywords, `dev run` signals, leftover folders (`SEE-BELOW`)
+- **Soft keywords:** a script's own `fn` with the same name as a built-in (`fsize`, `findloc`,
+  `append`, `write`, `lwrite`, `read`, `split`, …) wins when called with parentheses. Before,
+  `fn append(@a, @b)` didn't compile, and a user `fn fsize` was silently replaced by the
+  built-in. Without parentheses, the built-in form still applies. Future built-ins get this
+  automatically. The UE4 example compiles to its original bytecode again.
+- `quicktzs dev run` now cleans up temp files and folders on Ctrl-C, SIGTERM or SIGHUP, like
+  `exectzs`. Before, an interrupted `lwrite` on a big file left a hidden temp file behind.
+- Two failed appends into the same new folder no longer leave that empty folder behind.
+
 ## 2026-11-17
 
 ### Added: auto mkdir. Fixed: path check. Tested: signal cleanup (`1044f6e`)
