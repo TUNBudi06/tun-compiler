@@ -741,3 +741,97 @@ fn findloc_match_straddling_chunk_boundary_and_last_byte() {
     std::fs::write(d.join("g.bin"), &data).unwrap();
     assert_eq!(fl(&need, &p(&d, "g.bin"), &big, 0).out, "5\n");
 }
+
+// ---------------- auto-created parent dirs (write / append) ----------------
+
+fn wneed(d: &Path) -> [(u8, String); 1] {
+    [(WRITE_DIR, d.to_string_lossy().into_owned())]
+}
+
+#[test]
+fn write_creates_nested_missing_dirs_inside_root() {
+    let d = tmpdir("mk_w");
+    let r = write_prog(&wneed(&d), &p(&d, "a/b/c/x.bin"), "hi", 0, false);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(std::fs::read(d.join("a/b/c/x.bin")).unwrap(), b"hi");
+    assert_eq!(entries(&d.join("a/b/c")), ["x.bin"], "temp left behind");
+}
+
+#[test]
+fn write_creates_missing_need_root_itself() {
+    let d = tmpdir("mk_root");
+    let root = d.join("newroot");
+    let r = write_prog(&wneed(&root), &p(&root, "s/x.bin"), "hi", 0, false);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert!(root.join("s/x.bin").is_file());
+}
+
+#[test]
+fn append_creates_nested_missing_dirs_and_commits() {
+    let d = tmpdir("mk_a");
+    let r = ap(&wneed(&d), &opts(), &p(&d, "a/b/x.bin"), &["1", "2"], Tail::Halt);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(std::fs::read(d.join("a/b/x.bin")).unwrap(), b"12");
+    assert_eq!(entries(&d.join("a/b")), ["x.bin"]);
+}
+
+#[test]
+fn append_error_or_timeout_removes_created_dirs() {
+    let d = tmpdir("mk_a_err");
+    assert_eq!(ap(&wneed(&d), &opts(), &p(&d, "a/b/x.bin"), &["1"], Tail::Fail).code(), 1);
+    assert!(entries(&d).is_empty(), "created dirs left: {:?}", entries(&d));
+    let o = RunOptions { timeout_ms: Some(0), ..opts() };
+    assert_ne!(ap(&wneed(&d), &o, &p(&d, "a/b/x.bin"), &["1"], Tail::Halt).code(), 0);
+    assert!(entries(&d).is_empty(), "created dirs left: {:?}", entries(&d));
+}
+
+#[test]
+fn write_timeout_removes_created_dirs_but_keeps_preexisting() {
+    let d = tmpdir("mk_w_to");
+    std::fs::create_dir(d.join("keep")).unwrap();
+    let mut a = Asm::new();
+    a.need(WRITE_DIR, &d.to_string_lossy());
+    a.buf(0, "data");
+    a.let_(1, S(Box::leak(p(&d, "keep/n1/n2/x.bin").into_boxed_str())));
+    let k0 = a.k_i(0);
+    a.op(O::Write, &[sv(0), sv(1), sk(k0)]).halt();
+    let r = run_with(&a.build(), &RunOptions { timeout_ms: Some(0), ..opts() }, "");
+    assert_ne!(r.code(), 0);
+    assert_eq!(entries(&d), ["keep"]);
+    assert!(entries(&d.join("keep")).is_empty());
+}
+
+#[test]
+fn write_and_append_through_symlink_with_missing_dirs_cannot_escape() {
+    let d = tmpdir("mk_esc_root");
+    let other = tmpdir("mk_esc_other");
+    std::os::unix::fs::symlink(&other, d.join("link")).unwrap();
+    let path = p(&d, "link/new/x.bin");
+    let r = write_prog(&wneed(&d), &path, "evil", 0, false);
+    denied(&r);
+    assert!(entries(&other).is_empty(), "write escaped: {:?}", entries(&other));
+    denied(&ap(&wneed(&d), &opts(), &path, &["evil"], Tail::Halt));
+    assert!(entries(&other).is_empty(), "append escaped: {:?}", entries(&other));
+}
+
+#[test]
+fn write_and_append_with_file_as_parent_component_is_a_clear_error() {
+    let d = tmpdir("mk_notdir");
+    std::fs::write(d.join("f"), "x").unwrap();
+    let path = p(&d, "f/sub/x.bin");
+    let r = write_prog(&wneed(&d), &path, "a", 0, false);
+    assert_eq!(r.code(), 1, "{}", r.err);
+    assert!(r.err.contains("'f' is not a directory"), "{}", r.err);
+    let r = ap(&wneed(&d), &opts(), &path, &["a"], Tail::Halt);
+    assert_eq!(r.code(), 1, "{}", r.err);
+    assert!(r.err.contains("'f' is not a directory"), "{}", r.err);
+    assert_eq!(entries(&d), ["f"]);
+}
+
+#[test]
+fn lwrite_still_requires_existing_file_and_creates_no_dirs() {
+    let d = tmpdir("mk_lw");
+    let r = lw(&wneed(&d), &opts(), &p(&d, "a/b/x.bin"), "z", 0, 1, 0, 0);
+    assert_eq!(r.code(), 1, "{}", r.err);
+    assert!(entries(&d).is_empty());
+}

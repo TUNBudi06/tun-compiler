@@ -22,9 +22,25 @@ pub fn untrack_tmp(p: &Path) {
         t.retain(|x| x != p);
     }
 }
+/// Parent dirs created by write/append (in creation order): removed, deepest first and only if empty,
+/// on signal / panic.
+static MADE_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub fn track_dir(p: &Path) {
+    if let Ok(mut t) = MADE_DIRS.lock() {
+        t.push(p.to_path_buf());
+    }
+}
+pub fn untrack_dir(p: &Path) {
+    if let Ok(mut t) = MADE_DIRS.lock() {
+        t.retain(|x| x != p);
+    }
+}
 fn remove_tracked_tmps() {
     for f in TMPS.lock().map(|t| t.clone()).unwrap_or_default() {
         let _ = std::fs::remove_file(f);
+    }
+    for d in MADE_DIRS.lock().map(|t| t.clone()).unwrap_or_default().into_iter().rev() {
+        let _ = std::fs::remove_dir(d);
     }
 }
 static SIG_PIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);

@@ -47,15 +47,28 @@ fn absolute(p: &Path) -> PathBuf {
     }
 }
 
-/// Canonical form even for a path that does not exist yet.
-fn canon_loose(p: &Path) -> PathBuf {
+/// Canonical form even for a path that does not exist yet: canonicalize the deepest EXISTING
+/// ancestor (resolving symlinks) and append the missing components. `None` if a missing component
+/// is `..` (cannot be resolved safely).
+fn canon_loose(p: &Path) -> Option<PathBuf> {
     let abs = absolute(p);
     if let Ok(c) = std::fs::canonicalize(&abs) {
-        return c;
+        return Some(c);
     }
-    match (abs.parent().and_then(|d| std::fs::canonicalize(d).ok()), abs.file_name()) {
-        (Some(d), Some(n)) => d.join(n),
-        _ => lexical(&abs),
+    let mut rest = Vec::new();
+    let mut cur = abs.as_path();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(cur) {
+            return Some(rest.iter().rev().fold(c, |a, n| a.join(n)));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(par), Some(n)) => {
+                rest.push(n);
+                cur = par;
+            }
+            (Some(_), None) => return None, // trailing `..`
+            (None, _) => return Some(lexical(&abs)),
+        }
     }
 }
 
@@ -73,13 +86,15 @@ impl Perms {
     pub fn check(&self, path: &str, acc: Access) -> R<PathBuf> {
         let c = canon_loose(Path::new(path));
         let roots = if acc == Access::Read { &self.read } else { &self.write };
-        if roots.iter().any(|r| c.starts_with(canon_loose(r))) {
-            Ok(c)
-        } else {
+        // A missing root is fine (write creates it); `canon_loose` still resolves its existing prefix.
+        match c {
+            Some(c) if roots.iter().any(|r| canon_loose(r).is_some_and(|r| c.starts_with(r))) => Ok(c),
+            _ => {
             Err(Fault::Fatal(ExecError::new(
                 EXIT_PERM_DENIED,
                 format!("access to '{path}' is not permitted (no matching NEED)"),
             )))
+            }
         }
     }
 }
@@ -133,6 +148,49 @@ fn open_temp(p: &Path, shown: &str, mode: u32) -> R<(PathBuf, std::fs::File)> {
     Ok((tmp, f))
 }
 
+/// Create the missing parent dirs of `p` (inside the NEED root: `p` is already canonical and
+/// root-checked, and the existing prefix is symlink-free). Returns the dirs created, shallowest
+/// first, each registered for signal cleanup. Missing NEED root itself is created too (the
+/// manifest the user approved declares it).
+fn make_parents(p: &Path, shown: &str) -> R<Vec<PathBuf>> {
+    let mut missing = Vec::new();
+    let mut cur = p.parent();
+    while let Some(d) = cur {
+        match std::fs::metadata(d) {
+            Ok(m) if m.is_dir() => break,
+            Ok(_) => {
+                let n = d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned());
+                return Err(format!("cannot write '{shown}': '{n}' is not a directory").into());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => missing.push(d),
+            Err(e) => return Err(format!("cannot write '{shown}': {e}").into()),
+        }
+        cur = d.parent();
+    }
+    let mut made = Vec::new();
+    for d in missing.into_iter().rev() {
+        if let Err(e) = std::fs::create_dir(d) {
+            rm_dirs(&made);
+            return Err(format!("cannot write '{shown}': {e}").into());
+        }
+        crate::sandbox::track_dir(d);
+        made.push(d.to_path_buf());
+    }
+    Ok(made)
+}
+
+/// Undo `make_parents`: deepest first, ignoring non-empty / already gone.
+fn rm_dirs(dirs: &[PathBuf]) {
+    for d in dirs.iter().rev() {
+        let _ = std::fs::remove_dir(d);
+        crate::sandbox::untrack_dir(d);
+    }
+}
+
+fn keep_dirs(dirs: &[PathBuf]) {
+    dirs.iter().for_each(|d| crate::sandbox::untrack_dir(d));
+}
+
 fn timeout() -> Fault {
     Fault::Fatal(ExecError::new(1, "timeout"))
 }
@@ -146,7 +204,8 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     let meta = match std::fs::metadata(p) {
         Ok(m) if m.is_dir() => return Err(format!("cannot write '{shown}': is a directory").into()),
         Ok(m) => Some(m),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // ENOTDIR: a parent component is a file; make_parents reports it clearly
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => None,
         Err(e) => return Err(format!("cannot write '{shown}': {e}").into()),
     };
     // Size check BEFORE reading the old content into memory.
@@ -171,7 +230,14 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     } else {
         data
     };
-    let (tmp, mut f) = open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))?;
+    let made = make_parents(p, shown)?;
+    let (tmp, mut f) = match open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777)) {
+        Ok(t) => t,
+        Err(e) => {
+            rm_dirs(&made);
+            return Err(e);
+        }
+    };
     let res = (|| -> R<()> {
         for chunk in content.chunks(CHUNK) {
             if Instant::now() >= deadline {
@@ -192,7 +258,9 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
+        rm_dirs(&made);
     }
+    keep_dirs(&made);
     crate::sandbox::untrack_tmp(&tmp);
     res
 }
@@ -326,12 +394,15 @@ struct Staged {
     file: std::fs::File,
     perm: Option<std::fs::Permissions>,
     size: u64,
+    /// Parent dirs this append created; removed (if empty) when dropped uncommitted.
+    dirs: Vec<PathBuf>,
 }
 
 impl Drop for Staged {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.tmp);
         crate::sandbox::untrack_tmp(&self.tmp);
+        rm_dirs(&self.dirs);
     }
 }
 
@@ -359,13 +430,20 @@ impl Appends {
                 let meta = match std::fs::metadata(p) {
                     Ok(m) if m.is_dir() => return Err(format!("cannot write '{shown}': is a directory").into()),
                     Ok(m) => Some(m),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => None,
                     Err(e) => return Err(io(e).into()),
                 };
                 let old = meta.as_ref().map_or(0, |m| m.len());
-                let (tmp, file) = open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))?;
-                // from here Drop of `st` removes the temp on any error
-                let mut st = Staged { path: p.to_path_buf(), tmp, file, perm: meta.map(|m| m.permissions()), size: 0 };
+                let dirs = make_parents(p, shown)?;
+                let (tmp, file) = match open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        rm_dirs(&dirs);
+                        return Err(e);
+                    }
+                };
+                // from here Drop of `st` removes the temp (and created dirs) on any error
+                let mut st = Staged { path: p.to_path_buf(), tmp, file, perm: meta.map(|m| m.permissions()), size: 0, dirs };
                 if old > 0 {
                     let mut src = std::fs::File::open(p).map_err(io)?;
                     let mut buf = vec![0u8; CHUNK];
@@ -398,13 +476,15 @@ impl Appends {
 
     /// fsync + rename every staged temp over its target. On the first failure the rest are discarded.
     pub fn commit(&mut self) -> R<()> {
-        for s in std::mem::take(&mut self.0) {
+        for mut s in std::mem::take(&mut self.0) {
             let io = |e: std::io::Error| format!("cannot write '{}': {e}", s.path.display());
             s.file.sync_all().map_err(io)?;
             if let Some(m) = &s.perm {
                 let _ = s.file.set_permissions(m.clone()); // undo umask narrowing
             }
             std::fs::rename(&s.tmp, &s.path).map_err(io)?;
+            keep_dirs(&s.dirs);
+            s.dirs.clear();
         }
         Ok(())
     }

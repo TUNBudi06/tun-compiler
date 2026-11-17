@@ -300,6 +300,13 @@ limit applies to the final total).
 `findloc` streams the file in 64 KiB chunks with `len(pat)-1` bytes of overlap (memory
 O(chunk + pat), never O(file)); matches across chunk boundaries are found.
 
+`write` and `append` create missing parent directories of the target, but only inside the matched NEED
+write root (the root itself too, if missing: the signed manifest declares it). The path is resolved
+through the deepest existing ancestor, so a symlinked component cannot lead outside the root (exit
+126). A parent component that is a regular file is an error `cannot write '<path>': '<name>' is not a
+directory`. Dirs a failed/discarded write or append created are removed again (deepest first, only if
+empty), also on signal/panic. `lwrite` still requires an existing file.
+
 `append` stages: the first append to a path creates a temp file next to the target (the existing
 content, if any, is copied in once); later appends write straight to that temp. When the program
 ends normally (end of `start`, `halt`, or `exit N` with any N; after `on exit` handlers, including

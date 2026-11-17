@@ -6,6 +6,25 @@ existing modules build or run.
 
 ## 2026-11-17
 
+### Added: auto mkdir. Fixed: path check. Tested: signal cleanup (`SEE-BELOW`)
+- `write` and `append` create missing parent folders, only inside the `NEED write` folder. The
+  `NEED write` folder itself is created if it's missing, because the signed manifest declares
+  it. If the write fails, times out or is interrupted, the empty folders it created are removed
+  again. `lwrite` still requires an existing file.
+- **Path check fix:** a path whose folders don't exist yet was checked as plain text, so a link
+  inside the NEED folder could point outside it (`/data/link -> /etc`, then
+  `/data/link/new/x`). The check now resolves the deepest folder that exists. Such a path is
+  refused with exit 126.
+- A path whose parent is a file gives `'<name>' is not a directory`.
+- **New signal tests:**
+  - SIGINT, SIGTERM and SIGHUP during `append`: exit 130, 143 or 129, with no temp file left.
+  - Ctrl-C during `lwrite` on a 1 GiB file and during `write`.
+  - A real terminal Ctrl-C, sent to the whole process group, while a program started with `run`
+    is running. The program is gone afterwards and the temp folder is removed.
+- **Known limit:** if two appends in one new folder are both thrown away, that empty folder can
+  stay behind.
+
+
 ### Fixed: review of std libs, compiler and builder (`01d64c9`)
 - **std/regex:** a character class now costs one step per class item against the step
   budget. Before, a crafted pattern such as a 5000-character class with `{1000}` could run for

@@ -132,6 +132,12 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | `append` then runtime error | target untouched (or not created), no temp left |
 | `append` then timeout | target untouched, no temp left |
 | `append` then SIGINT/SIGTERM/SIGHUP or panic | temps removed, targets untouched |
+| `write`/`append` to `root/a/b/x` with `a`,`b` missing | dirs created inside the NEED write root, file written |
+| `write`/`append` error or timeout after creating dirs | the created (empty) dirs are removed |
+| `write`/`append` via symlink component + missing dirs (`root/link/new/x`, link -> outside) | exit 126, nothing created outside |
+| `write`/`append` where a parent component is a file | error `'<name>' is not a directory` |
+| `lwrite` on a missing file / missing dirs | error, nothing created |
+| Ctrl-C (SIGINT to the process group) during append or RUN | exit 130, temps/dirs removed, RUN child gone |
 | `append` path outside any NEED write root | exit 126, same as `write` |
 | `append` total (existing + appended) over the memory limit | succeeds (streams to disk, not memory-limited) |
 | 65th distinct staged path | runtime error `append: too many files in flight (max 64)` |
