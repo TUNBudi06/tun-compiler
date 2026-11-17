@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-18
 
-### Fixed: soft keywords, `dev run` signals, leftover folders (`SEE-BELOW`)
+### Fixed: soft keywords, `dev run` signals, leftover folders (`52d37e3`)
 - **Soft keywords:** a script's own `fn` with the same name as a built-in (`fsize`, `findloc`,
   `append`, `write`, `lwrite`, `read`, `split`, …) wins when called with parentheses. Before,
   `fn append(@a, @b)` didn't compile, and a user `fn fsize` was silently replaced by the
