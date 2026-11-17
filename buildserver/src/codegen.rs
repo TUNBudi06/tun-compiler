@@ -4,17 +4,11 @@ use std::fmt::Write;
 use tunpak_format::identity::{Identity, KEY_REVOKED};
 
 pub fn validate_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("http://") {
-        return Err("server url must start with http:// (https needs a TLS reverse proxy)".into());
+    if tunpak_format::config::url_ok(url) {
+        Ok(())
+    } else {
+        Err("server url must be http(s)://, at most 2048 bytes, printable ASCII without quote or backslash".into())
     }
-    if url.len() > 2048 {
-        return Err("server url longer than 2048 bytes".into());
-    }
-    // Printable ASCII only, no quote/backslash: nothing that could matter inside a Rust literal.
-    if !url.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\') {
-        return Err("server url contains a forbidden character".into());
-    }
-    Ok(())
 }
 
 fn bytes(b: &[u8]) -> String {
@@ -126,7 +120,7 @@ mod tests {
     #[test]
     fn url_validation_rejects_injection() {
         for bad in [
-            "https://k.example".to_string(),
+            "ftp://k.example".to_string(),
             "http://a\"; compile_error!(\"x\"); \"".into(),
             "http://a\nfn evil(){}".into(),
             "http://a\u{0}b".into(),
@@ -135,6 +129,7 @@ mod tests {
             format!("http://{}", "a".repeat(2048)),
         ] {
             assert!(validate_url(&bad).is_err(), "{bad:?}");
+        assert!(validate_url("https://k.example").is_ok());
             assert!(generated_keys_rs(&id(), 2, None, Some(&bad)).is_err());
         }
         assert!(validate_url(&format!("http://{}", "a".repeat(2041))).is_ok());

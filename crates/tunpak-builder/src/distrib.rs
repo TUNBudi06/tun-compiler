@@ -1,5 +1,6 @@
 //! Distributor first-run steps 2-5 (spec/06): setup-server, setup-user, gen-generator, gen-executor.
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tunpak_crypto::{encrypt::random_bytes, hash::sha256};
@@ -31,10 +32,13 @@ fn apps_dir(dir: &Path, app_id: u32) -> PathBuf {
 
 /// Step 2: server.tsrv + server-data/apps/<app_id>/{master.key,licenses}. Returns the apps folder.
 pub fn setup_server(identity: &Path, url: &str, dir: &Path, cache_ttl: Option<u32>, force: bool) -> Result<PathBuf, BuildError> {
-    crate::http::parse_url(url)?;
+    if !tunpak_format::config::url_ok(url) {
+        return msg("invalid --url: need http(s)://..., printable ASCII, no '\"' or '\\', at most 2048 bytes");
+    }
     let id = load_identity(identity)?;
     let app = apps_dir(dir, id.app_id);
     let (tsrv, master, lic) = (dir.join("server.tsrv"), app.join("master.key"), app.join("licenses"));
+    // --force keeps master.key and licenses: regenerating them would break every issued license and shipped pak
     if !force {
         if let Some(p) = [&tsrv, &master, &lic].into_iter().find(|p| p.exists()) {
             return msg(format!("{} already exists (use --force to overwrite)", p.display()));
@@ -51,8 +55,12 @@ pub fn setup_server(identity: &Path, url: &str, dir: &Path, cache_ttl: Option<u3
     cfg.serialize(&mut b)?;
     fs::create_dir_all(&app).map_err(|e| io("create", &app, e))?;
     write_atomic_mode(&tsrv, &b, None)?;
-    write_atomic_mode(&master, &Secret(rnd32()?).0, Some(0o600))?;
-    write_atomic_mode(&lic, b"", Some(0o600))?;
+    if !master.exists() {
+        write_atomic_mode(&master, &Secret(rnd32()?).0, Some(0o600))?;
+    }
+    if !lic.exists() {
+        write_atomic_mode(&lic, b"", Some(0o600))?;
+    }
     Ok(app)
 }
 
@@ -60,14 +68,11 @@ pub fn setup_server(identity: &Path, url: &str, dir: &Path, cache_ttl: Option<u3
 pub fn add_license(identity: &Path, dir: &Path) -> Result<String, BuildError> {
     let id = load_identity(identity)?;
     let lic = apps_dir(dir, id.app_id).join("licenses");
-    let mut cur = fs::read_to_string(&lic).map_err(|e| io("read", &lic, e))?;
     let license = hex(&rnd32()?);
-    if !cur.is_empty() && !cur.ends_with('\n') {
-        cur.push('\n');
-    }
-    cur.push_str(&hex(&sha256(license.as_bytes())));
-    cur.push('\n');
-    write_atomic_mode(&lic, cur.as_bytes(), Some(0o600))?;
+    // O_APPEND with one write per line: concurrent runs cannot lose each other's line
+    let line = format!("{}\n", hex(&sha256(license.as_bytes())));
+    let mut f = fs::OpenOptions::new().append(true).open(&lic).map_err(|e| io("open", &lic, e))?;
+    f.write_all(line.as_bytes()).map_err(|e| io("write", &lic, e))?;
     Ok(license)
 }
 
@@ -140,7 +145,7 @@ pub fn parse_targets(s: &str) -> Result<Vec<Target>, BuildError> {
 }
 
 /// Step 5. Returns true when every target succeeded. Key mode: `tsrv` -> 2, else `master` -> 1, else 0.
-pub fn gen_executor(identity: &Path, server: &str, targets: Vec<Target>, out: &Path, master: Option<Secret>, tsrv: Option<Vec<u8>>) -> Result<bool, BuildError> {
+pub fn gen_executor(identity: &Path, server: &str, targets: Vec<Target>, out: &Path, master: Option<Secret>, tsrv: Option<Vec<u8>>, token: Option<String>) -> Result<bool, BuildError> {
     crate::http::parse_url(server)?;
     if master.is_some() && tsrv.is_some() {
         return msg("--master-key and --server-config are mutually exclusive");
@@ -158,8 +163,22 @@ pub fn gen_executor(identity: &Path, server: &str, targets: Vec<Target>, out: &P
     let mut body = Vec::new();
     req.serialize(&mut body)?;
     body.extend(tsrv.unwrap_or_default());
-    let hdr: Vec<(&str, String)> = master.iter().map(|m| ("X-Tunpak-Master-Key", hex(&m.0))).collect();
+    let (host, _) = crate::http::parse_url(server)?;
+    let h = host.rsplit_once(':').map_or(host.as_str(), |x| x.0);
+    if master.is_some() && !matches!(h, "localhost" | "127.0.0.1" | "[::1]") {
+        return msg(format!("refusing to send the master key over plain http to '{h}'; use an SSH tunnel and --server http://localhost:PORT"));
+    }
+    let mut hdr: Vec<(&str, String)> = master.iter().map(|m| ("X-Tunpak-Master-Key", hex(&m.0))).collect();
+    if let Some(t) = token {
+        if t.is_empty() || !t.bytes().all(|b| (0x21..0x7f).contains(&b)) {
+            return msg("build token must be non-empty printable ASCII without spaces");
+        }
+        hdr.push(("X-Tunpak-Build-Token", t));
+    }
     let (status, resp) = crate::http::post(server, "build", &hdr, &body)?;
+    if status == 403 {
+        return msg("build server answered 403: build token missing or wrong (set TUNPAK_BUILD_TOKEN or --build-token <file>)");
+    }
     if status != 200 {
         return msg(format!("build server answered {status}: {}", String::from_utf8_lossy(&resp).trim()));
     }

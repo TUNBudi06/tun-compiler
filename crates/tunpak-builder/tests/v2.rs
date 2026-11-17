@@ -180,7 +180,7 @@ fn signed_round_trips() {
         assert!(r.ok(), "compress={compress} encrypt={encrypt}: {:?} {}", r.res, r.err);
         assert!(r.out.ends_with(&want()), "compress={compress} encrypt={encrypt}");
         let s = inspect(&pak).unwrap();
-        assert!(s.contains("signed (sign_len 64)"), "{s}");
+        assert!(s.contains("signature present, not verified (sign_len 64)"), "{s}");
         if encrypt {
             assert!(s.contains("<encrypted>") && s.contains("encrypted"), "{s}");
         } else {
@@ -355,7 +355,7 @@ fn lib_import_builds_and_runs() {
         assert!(r.ok(), "{:?} {}", r.res, r.err);
         assert!(r.out.ends_with("42\nABC\n"), "{:?}", r.out);
         if !encrypt {
-            assert!(inspect(&pak).unwrap().contains("lib/mini.so exports (2)"));
+            assert!(inspect(&pak).unwrap().contains("\"lib/mini.so\" exports (2)"));
         }
     }
 }

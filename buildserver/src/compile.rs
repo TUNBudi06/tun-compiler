@@ -131,7 +131,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<(bool, Vec<u8
 
 fn build_one(work: &Path, data: &Path, triple: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or("cargo".into()));
-    cmd.args(["build", "--release", "-p", "tunpak-executor", "--target", triple])
+    cmd.args(["build", "--locked", "--release", "-p", "tunpak-executor", "--target", triple])
         .current_dir(work)
         .env("CARGO_TARGET_DIR", data.join("target"))
         .env("CARGO_TERM_COLOR", "never");

@@ -23,12 +23,30 @@ pub struct Config {
     pub build_timeout: Duration,
     /// Total time allowed to read one request (head + body).
     pub read_deadline: Duration,
+    /// If set, `/build` requires header `X-Tunpak-Build-Token` equal to this.
+    pub build_token: Option<Vec<u8>>,
+}
+
+/// Constant-time for equal lengths; the token length is not secret.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+struct SlotGuard(Arc<AtomicUsize>);
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Creates `<data>/work` and returns the absolute data dir; cargo runs with a different cwd, so
 /// a relative path would resolve wrongly there. Library callers building a `Config` should use it.
 pub fn prepare_data_dir(data: &std::path::Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(data.join("work")).map_err(|e| format!("cannot create {}: {e}", data.display()))?;
+    // target/ holds binaries embedding distributors' master keys: owner only.
+    std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("cannot chmod {}: {e}", data.display()))?;
     std::fs::canonicalize(data).map_err(|e| format!("cannot resolve {}: {e}", data.display()))
 }
 
@@ -76,10 +94,10 @@ pub fn serve(listener: TcpListener, cfg: Arc<Config>) {
         }
         let (cfg, lock, active) = (cfg.clone(), build_lock.clone(), active.clone());
         std::thread::spawn(move || {
+            let _slot = SlotGuard(active);
             if let Err(e) = handle(stream, &cfg, &lock) {
                 eprintln!("connection error: {e}");
             }
-            active.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }
@@ -107,6 +125,7 @@ struct Head {
     path: String,
     content_length: Option<usize>,
     master_key: Option<String>,
+    build_token: Option<String>,
     chunked: bool,
 }
 
@@ -120,7 +139,7 @@ fn parse_head(raw: &[u8]) -> Result<Head, &'static str> {
     if !ver.starts_with("HTTP/1.") || !path.starts_with('/') || method.is_empty() {
         return Err("malformed request line");
     }
-    let mut h = Head { method: method.into(), path: path.into(), content_length: None, master_key: None, chunked: false };
+    let mut h = Head { method: method.into(), path: path.into(), content_length: None, master_key: None, build_token: None, chunked: false };
     for l in lines.filter(|l| !l.is_empty()) {
         let (k, v) = l.split_once(':').ok_or("malformed header")?;
         let v = v.trim();
@@ -133,6 +152,7 @@ fn parse_head(raw: &[u8]) -> Result<Head, &'static str> {
             }
             "transfer-encoding" => h.chunked = true,
             "x-tunpak-master-key" => h.master_key = Some(v.into()),
+            "x-tunpak-build-token" => h.build_token = Some(v.into()),
             _ => {}
         }
     }
@@ -182,7 +202,7 @@ fn respond(s: &mut TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> Result<(R
         }
     };
     let head = parse_head(&buf[..end])?;
-    let mut line = format!("{} {}", head.method, head.path);
+    let mut line = format!("{:?} {:?}", head.method, head.path);
     let (want, allowed, max) = match head.path.as_str() {
         "/health" => ("health", "GET", 0),
         "/build" => ("build", "POST", MAX_BODY),
@@ -194,6 +214,13 @@ fn respond(s: &mut TcpStream, cfg: &Config, build_lock: &Mutex<()>) -> Result<(R
     }
     if want == "health" {
         return Ok((text(200, "ok"), line));
+    }
+    if want == "build" {
+        if let Some(t) = &cfg.build_token {
+            if !ct_eq(t, head.build_token.as_deref().unwrap_or("").as_bytes()) {
+                return Ok((text(403, "build token missing or wrong"), line));
+            }
+        }
     }
     if head.chunked {
         return Err("Transfer-Encoding is not supported; send Content-Length");
@@ -271,6 +298,17 @@ pub fn parse_build(body: &[u8], master_hex: Option<&str>) -> Result<Parsed, Stri
     }
 }
 
+fn lock_data(data: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let p = data.join("work/.lock");
+    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&p).map_err(|e| format!("cannot open {}: {e}", p.display()))?;
+    // SAFETY: valid fd owned by `f`; flock has no memory effects.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("build in progress in another server process, retry later".into());
+    }
+    Ok(f) // released on drop
+}
+
 fn handle_build(cfg: &Config, lock: &Mutex<()>, body: &[u8], master_hex: Option<&str>) -> (Resp, Option<u32>) {
     let p = match parse_build(body, master_hex) {
         Ok(p) => p,
@@ -282,7 +320,16 @@ fn handle_build(cfg: &Config, lock: &Mutex<()>, body: &[u8], master_hex: Option<
         Err(e) => return (text(400, &e), app),
     };
     let results = {
-        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = match lock.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(_) => return (text(503, "build in progress, retry later"), app),
+        };
+        // Cross-process guard: two servers on one --data would mix generated keys.
+        let _flock = match lock_data(&cfg.data) {
+            Ok(f) => f,
+            Err(e) => return (text(503, &e), app),
+        };
         compile::build_all(&cfg.template, &cfg.data, &src, &p.req.targets, cfg.build_timeout)
     };
     let mut out = vec![results.len() as u8]; // <= 255: the request's target count is one byte
@@ -379,10 +426,61 @@ mod tests {
     }
 
     #[test]
+    fn helpers() {
+        assert!(ct_eq(b"abc", b"abc") && !ct_eq(b"abc", b"abd") && !ct_eq(b"abc", b"ab"));
+        assert!(codegen::validate_url("https://k.example").is_ok());
+        assert!(codegen::validate_url("ftp://k.example").is_err());
+        let a = Arc::new(AtomicUsize::new(1));
+        let a2 = a.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = SlotGuard(a2);
+            panic!("boom");
+        })
+        .join();
+        assert_eq!(a.load(Ordering::SeqCst), 0);
+        let d = tmp("flock");
+        let f = lock_data(&d).unwrap();
+        assert!(lock_data(&d).unwrap_err().contains("in progress"));
+        drop(f);
+        assert!(lock_data(&d).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn build_token_and_busy() {
+        let data = tmp("tok");
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let cfg = Config { data: data.clone(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline: DEFAULT_READ_DEADLINE, build_token: Some(b"s3cret".to_vec()) };
+        std::thread::spawn(move || serve(l, Arc::new(cfg)));
+        assert_eq!(post(addr, "/build", b"x").0, 403);
+        let with = |t: &str| format!("POST /build HTTP/1.1\r\nX-Tunpak-Build-Token: {t}\r\nContent-Length: 1\r\n\r\nx");
+        assert_eq!(http(addr, with("wrong").as_bytes()).0, 403);
+        assert_eq!(http(addr, with("s3cret").as_bytes()).0, 400); // authed, then garbage body
+        // a running build makes /build answer 503 immediately
+        let lock = Mutex::new(());
+        let _g = lock.lock().unwrap();
+        let cfg2 = Config { data: data.clone(), template: PathBuf::new(), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline: DEFAULT_READ_DEADLINE, build_token: None };
+        let ((st, body), _) = handle_build(&cfg2, &lock, &request(identity()), None);
+        assert_eq!((st, body), (503, b"build in progress, retry later".to_vec()));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn duplicate_targets_rejected() {
+        let req = BuildRequest { version: 1, identity: identity(), targets: vec![Target { arch: Arch::X64, platform: Platform::LinuxGlibc }; 2], options: 6 };
+        let mut o = vec![];
+        req.serialize(&mut o).unwrap();
+        assert!(parse_build(&o, None).unwrap_err().contains("duplicate target"));
+    }
+
+    #[test]
     fn data_dir_becomes_absolute() {
         let rel = PathBuf::from(format!("target/bs-rel-{}", std::process::id()));
         let abs = prepare_data_dir(&rel).unwrap();
         assert!(abs.is_absolute() && abs.join("work").is_dir());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&abs).unwrap().permissions().mode() & 0o777, 0o700);
         let _ = std::fs::remove_dir_all(&abs);
     }
 
@@ -393,7 +491,7 @@ mod tests {
     fn start_with(data: &std::path::Path, read_deadline: Duration) -> std::net::SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
-        let cfg = Config { data: data.to_path_buf(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline };
+        let cfg = Config { data: data.to_path_buf(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline, build_token: None };
         std::thread::spawn(move || serve(l, Arc::new(cfg)));
         addr
     }

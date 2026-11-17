@@ -88,6 +88,7 @@ pub fn entry_type_for(path: &str) -> Option<EntryType> {
     }
     let (top, _) = path.split_once('/')?;
     match top {
+        "lib" if path.ends_with(".lfnt") => None, // sidecar for foreign-arch libs, read by libs.rs
         "lib" => Some(EntryType::Lib),
         "asset" => Some(EntryType::Asset),
         "run" => Some(EntryType::Run),

@@ -34,7 +34,7 @@ fn last_dl_error() -> String {
     // SAFETY: dlerror returns null or a NUL-terminated string valid until the next dl* call; we copy it at once.
     unsafe {
         let p = dlerror();
-        if p.is_null() { "unknown dlopen error".into() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
+        if p.is_null() { "unknown dlopen error".into() } else { crate::perm::escape(&CStr::from_ptr(p).to_string_lossy()) }
     }
 }
 
@@ -65,7 +65,10 @@ impl LoadedLib {
             drop(f);
             std::fs::rename(&part, &path)
         };
-        write().map_err(|x| format!("lib '{}': cannot extract: {x}", e.path))?;
+        write().map_err(|x| {
+            let _ = std::fs::remove_file(&part);
+            format!("lib '{}': cannot extract: {x}", crate::perm::escape(&e.path))
+        })?;
         let cpath = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "bad temp path".to_string())?;
         // SAFETY: `cpath` is a valid NUL-terminated path; dlopen has no other preconditions. Loading
         // runs the lib's initializers, which is inherent to loading a signed distributor lib.
@@ -81,7 +84,7 @@ impl LoadedLib {
         let free = symbol(handle, SYM_FREE)?;
         // SAFETY: the symbols are looked up by the ABI names; the contract (abi.rs) fixes their
         // signatures. A lib that lies about its signature is outside the trust model (it is signed
-        // by the distributor and shown in the manifest).
+        // by the distributor and listed in the manifest as 'Runs native library').
         unsafe {
             let v = std::mem::transmute::<*mut c_void, AbiVersionFn>(ver)();
             if v != ABI_VERSION {
@@ -122,7 +125,7 @@ impl LoadedLib {
         let copied = self.take_ret(&ret);
         if rc != 0 {
             let msg = match (ret.tag, copied) {
-                (TP_STR, Ok(Value::Str(s))) => s.to_string(),
+                (TP_STR, Ok(Value::Str(s))) => crate::perm::escape(&s),
                 _ => format!("error code {rc}"),
             };
             return Err(format!("lib fn '{}' failed: {msg}", f.name));

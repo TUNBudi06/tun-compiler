@@ -31,6 +31,8 @@ use tunpak_format::types::{EntryType, PermKind};
 
 const MAX_CALL_DEPTH: usize = 256;
 const MAX_HANDLERS: usize = 4096;
+const MAX_LOOPS: usize = 4096;
+const TICK: u32 = 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MEM: u64 = 256 << 20;
 const DEFAULT_ON_EXIT_MS: u64 = 5_000;
@@ -101,11 +103,14 @@ pub struct Vm<'a, 'io> {
     pc: usize,
     handlers: Vec<Handler>,
     /// (handler insn index, frame depth that registered it)
-    on_exit: Option<(usize, usize)>,
+    on_exit: Option<(usize, usize, Option<Vars>)>,
     in_handler: bool,
     big_endian: bool,
     deadline: Instant,
-    ticks: u32,
+    /// Instructions left until the next deadline check; O(n) ops burn extra (see `weigh`).
+    budget: u32,
+    /// Container depth stored since the last whole-heap nesting check.
+    nest_acc: usize,
     cur_off: usize,
     mem_limit: u64,
     pending: u64,
@@ -142,7 +147,8 @@ impl<'a, 'io> Vm<'a, 'io> {
             in_handler: false,
             big_endian: false,
             deadline: Instant::now() + limits.timeout,
-            ticks: 0,
+            budget: TICK,
+            nest_acc: 0,
             cur_off: 0,
             mem_limit,
             pending: 0,
@@ -222,10 +228,12 @@ impl<'a, 'io> Vm<'a, 'io> {
     }
 
     fn run_on_exit(&mut self) {
-        let Some((addr_idx, depth)) = self.on_exit.take() else { return };
+        let Some((addr_idx, depth, saved)) = self.on_exit.take() else { return };
         // Reuse the vars of the frame that registered the handler (if it still exists); drop
         // everything else so a memory blow-up does not starve the handler.
-        let vars = if depth < self.callers.len() {
+        let vars = if let Some(v) = saved {
+            v
+        } else if depth < self.callers.len() {
             std::mem::take(&mut self.callers[depth].vars)
         } else if depth == self.callers.len() {
             std::mem::take(&mut self.cur.vars)
@@ -269,10 +277,21 @@ impl<'a, 'io> Vm<'a, 'io> {
         format!("{msg}\n  at offset {} in fn '{}'\n  call stack: {}", self.cur_off, name(&self.cur), parts.join(" <- "))
     }
 
+    /// The frame that registered ON_EXIT is about to be discarded: keep its vars for the handler.
+    fn save_on_exit_vars(&mut self) {
+        let depth = self.callers.len();
+        if let Some((_, d, saved @ None)) = &mut self.on_exit {
+            if *d == depth {
+                *saved = Some(std::mem::take(&mut self.cur.vars));
+            }
+        }
+    }
+
     /// Unwind to the innermost TRY handler. False if there is none.
     fn unwind(&mut self) -> bool {
         let Some(h) = self.handlers.pop() else { return false };
         while self.callers.len() > h.depth {
+            self.save_on_exit_vars();
             match self.callers.pop() {
                 Some(f) => self.cur = f,
                 None => break,
@@ -310,6 +329,32 @@ impl<'a, 'io> Vm<'a, 'io> {
         Ok(())
     }
 
+    /// Burn deadline-check budget for an O(n) op on `n` bytes/items.
+    fn weigh(&mut self, n: usize) {
+        self.budget = self.budget.saturating_sub((n >> 10).min(u32::MAX as usize) as u32);
+    }
+
+    /// `check_store` plus the amortized whole-heap nesting check (see `NEST_SLACK`).
+    fn check_store(&mut self, v: &Value, target: Option<*const ()>) -> R<()> {
+        let d = super::vars::check_store(v, target)?;
+        if d == 0 {
+            return Ok(());
+        }
+        self.nest_acc += d;
+        if self.nest_acc >= NEST_SLACK {
+            self.nest_acc = d;
+            let roots = self.callers.iter().chain(std::iter::once(&self.cur)).flat_map(|f| {
+                let loops = f.loops.iter().filter_map(|l| match l {
+                    LoopState::Each { items, .. } => Some(items.iter()),
+                    _ => None,
+                });
+                f.vars.iter().chain(f.stack.iter()).chain(loops.flatten())
+            });
+            check_nesting(roots)?;
+        }
+        Ok(())
+    }
+
     fn live_size(&self) -> u64 {
         let mut seen = HashSet::new();
         let mut total = 0;
@@ -334,6 +379,7 @@ impl<'a, 'io> Vm<'a, 'io> {
     }
     /// Push a freshly created value (charged to the memory accounting).
     fn push_new(&mut self, v: Value) -> R<()> {
+        self.weigh(shallow_size(&v) as usize);
         self.alloc(shallow_size(&v))?;
         self.push(v)
     }
@@ -462,9 +508,12 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         let Some(insn) = prog.insns.get(self.pc) else { return Ok(Some(0)) };
         self.cur_off = off;
-        self.ticks = self.ticks.wrapping_add(1);
-        if self.ticks & 1023 == 0 && Instant::now() >= self.deadline {
-            return Err(fatal(EXIT_ERROR, "timeout"));
+        self.budget = self.budget.saturating_sub(1);
+        if self.budget == 0 {
+            self.budget = TICK;
+            if Instant::now() >= self.deadline {
+                return Err(fatal(EXIT_ERROR, "timeout"));
+            }
         }
         self.pc += 1;
         self.exec(insn)
@@ -472,6 +521,9 @@ impl<'a, 'io> Vm<'a, 'io> {
 
     /// True when the outermost frame of a nested (imported-function) VM returned: the VM is done.
     fn do_return(&mut self, v: Value) -> R<bool> {
+        if !self.callers.is_empty() {
+            self.save_on_exit_vars();
+        }
         let Some(caller) = self.callers.pop() else {
             if self.nested {
                 self.ret_val = Some(v);
@@ -522,7 +574,13 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::Exit => {
                 let code = a_u8(insn, 0);
                 let text = stringify(&self.konst(a_cref(insn, 1))?);
-                let r = if code != 0 { writeln!(self.io.err, "{text}") } else { writeln!(self.io.out, "{text}") };
+                let r = if text.is_empty() {
+                    Ok(())
+                } else if code != 0 {
+                    writeln!(self.io.err, "{text}")
+                } else {
+                    writeln!(self.io.out, "{text}")
+                };
                 r.map_err(|e| format!("output error: {e}"))?;
                 return Ok(Some(code as i32));
             }
@@ -627,7 +685,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::When => {
                 let subject = self.pop()?;
                 let c = self.konst(a_cref(insn, 0))?;
-                if !values_equal(&subject, &c) {
+                if !values_equal(&subject, &c)? {
                     self.goto(a_addr(insn, 1))?;
                 }
             }
@@ -676,6 +734,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::Indexof => {
                 let needle = self.pop()?;
                 let hay = self.pop()?;
+                self.weigh(str_of(&hay, "INDEXOF subject")?.len());
                 let n = ops::indexof(str_of(&hay, "INDEXOF subject")?, str_of(&needle, "INDEXOF needle")?);
                 self.push(Value::Int(n))?;
             }
@@ -684,22 +743,46 @@ impl<'a, 'io> Vm<'a, 'io> {
                 let from = self.pop()?;
                 let s = self.pop()?;
                 let (s, from, to) = (str_of(&s, "REPLACE subject")?, str_of(&from, "REPLACE from")?, str_of(&to, "REPLACE to")?);
-                let r = if from.is_empty() { s.to_string() } else { s.replace(from, to) };
-                self.push_new(Value::str(r))?;
+                self.weigh(s.len());
+                let r = if from.is_empty() {
+                    s.to_string()
+                } else {
+                    // charge the result size BEFORE building it
+                    let n = s.matches(from).count() as u64;
+                    self.alloc((s.len() as u64).saturating_add(n.saturating_mul((to.len() as u64).saturating_sub(from.len() as u64))))?;
+                    s.replace(from, to)
+                };
+                self.push(Value::str(r))?;
             }
             O::Split => {
                 let sep = self.src(a_src(insn, 1))?;
                 let s = self.var(a_var(insn, 0))?;
-                let parts = ops::split(str_of(&s, "SPLIT subject")?, str_of(&sep, "SPLIT separator")?);
-                self.push_new(Value::arr(parts))?;
+                let (subj, sep) = (str_of(&s, "SPLIT subject")?, str_of(&sep, "SPLIT separator")?);
+                self.weigh(subj.len());
+                // elements * 16 + their bytes, charged before the parts exist
+                let n = if sep.is_empty() { subj.chars().count() } else { subj.matches(sep).count() + 1 };
+                self.alloc((n as u64).saturating_mul(16).saturating_add(subj.len() as u64))?;
+                self.push(Value::arr(ops::split(subj, sep)))?;
             }
             O::Join => {
                 let sep = self.src(a_src(insn, 1))?;
                 let a = self.var(a_var(insn, 0))?;
                 let sep = stringify(&sep);
                 let Value::Arr(a) = a else { return Err(format!("JOIN needs arr, got {}", a.type_name()).into()) };
-                let strs: Vec<String> = a.borrow().iter().map(stringify).collect();
-                self.push_new(Value::str(strs.join(&sep)))?;
+                let mut strs: Vec<String> = Vec::new();
+                let mut total = 0u64;
+                for x in a.borrow().iter() {
+                    let t = stringify(x);
+                    total = total.saturating_add(t.len() as u64 + sep.len() as u64);
+                    // charge incrementally: abort before the join is built
+                    if total > self.mem_limit {
+                        return Err(oom());
+                    }
+                    strs.push(t);
+                }
+                self.weigh(total as usize);
+                self.alloc(total)?;
+                self.push(Value::str(strs.join(&sep)))?;
             }
             O::Trim => {
                 let v = self.var(a_var(insn, 0))?;
@@ -776,7 +859,7 @@ impl<'a, 'io> Vm<'a, 'io> {
                 let len = self.int_src(a_src(insn, 2), "len")?;
                 let off = self.int_src(a_src(insn, 1), "off")?;
                 let Value::Buf(b) = self.var(a_var(insn, 0))? else { return Err("HEX_RANGE needs a buf".into()) };
-                let h = ops::hex_lower(slice_at(&b, off, len)?);
+                let h = crate::stdlib::hex::encode(slice_at(&b, off, len)?);
                 self.push_new(Value::str(h))?;
             }
             O::Slice => {
@@ -828,7 +911,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::ArrPush => {
                 let val = self.pop()?;
                 let a = self.arr(a_var(insn, 0))?;
-                check_store(&val, Value::Arr(a.clone()).container_id())?;
+                self.check_store(&val, Value::Arr(a.clone()).container_id())?;
                 self.alloc(16)?;
                 a.borrow_mut().push(val);
             }
@@ -840,7 +923,14 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::Contains => {
                 let item = self.src(a_src(insn, 1))?;
                 let a = self.arr(a_var(insn, 0))?;
-                let found = a.borrow().iter().any(|x| values_equal(x, &item));
+                self.weigh(a.borrow().len());
+                let mut found = false;
+                for x in a.borrow().iter() {
+                    if values_equal(x, &item)? {
+                        found = true;
+                        break;
+                    }
+                }
                 self.push(Value::bool(found))?;
             }
 
@@ -871,7 +961,7 @@ impl<'a, 'io> Vm<'a, 'io> {
                 }
                 items.reverse();
                 let t = Value::Tuple(std::rc::Rc::new(items));
-                check_store(&t, None)?;
+                self.check_store(&t, None)?;
                 self.push_new(t)?;
             }
             O::TupleGet => {
@@ -922,7 +1012,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             O::OnExit => {
                 let idx = self.prog.idx_of(a_addr(insn, 0)).ok_or("ON_EXIT address is not an instruction boundary")?;
                 if !self.in_handler {
-                    self.on_exit = Some((idx, self.callers.len()));
+                    self.on_exit = Some((idx, self.callers.len(), None));
                 }
             }
             O::Try => {
@@ -982,14 +1072,14 @@ impl<'a, 'io> Vm<'a, 'io> {
     fn set_index(&mut self, var: u8, key: Value, val: Value) -> R<()> {
         match self.var(var)? {
             Value::Arr(a) => {
-                check_store(&val, Value::Arr(a.clone()).container_id())?;
+                self.check_store(&val, Value::Arr(a.clone()).container_id())?;
                 let mut b = a.borrow_mut();
                 let i = arr_index(int_of(&key, "index")?, b.len())?;
                 b[i] = val;
             }
             Value::Object(o) => {
                 let k = key_str(&key);
-                check_store(&val, Value::Object(o.clone()).container_id())?;
+                self.check_store(&val, Value::Object(o.clone()).container_id())?;
                 self.alloc(16 + k.len() as u64)?;
                 o.borrow_mut().set(k.into(), val);
             }
@@ -1019,6 +1109,14 @@ impl<'a, 'io> Vm<'a, 'io> {
         Ok(())
     }
 
+    fn push_loop(&mut self, l: LoopState) -> R<()> {
+        if self.cur.loops.len() >= MAX_LOOPS {
+            return Err(format!("too many active loops (max {MAX_LOOPS})").into());
+        }
+        self.cur.loops.push(l);
+        Ok(())
+    }
+
     fn op_for_start(&mut self, insn: &Insn) -> R<()> {
         let var = a_var(insn, 0);
         let end_idx = |vm: &Self| -> R<usize> {
@@ -1037,7 +1135,7 @@ impl<'a, 'io> Vm<'a, 'io> {
                 None => self.pc = end_idx(self)?,
                 Some(first) => {
                     self.cur.vars.set(var, first.clone());
-                    self.cur.loops.push(LoopState::Each { var, items, idx: 0 });
+                    self.push_loop(LoopState::Each { var, items, idx: 0 })?;
                 }
             }
             return Ok(());
@@ -1052,7 +1150,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             self.pc = end_idx(self)?;
         } else {
             self.cur.vars.set(var, Value::Int(a));
-            self.cur.loops.push(LoopState::Range { var, cur: a, end: b, step });
+            self.push_loop(LoopState::Range { var, cur: a, end: b, step })?;
         }
         Ok(())
     }
@@ -1334,7 +1432,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             return Ok(if code != 0 { Some(code) } else { None });
         }
         let vars = &self.cur.vars;
-        let st = run_exec::run(svc, r, &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io)?;
+        let st = run_exec::run(svc, r, &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io, self.deadline)?;
         self.env.last_exit = st;
         Ok(None)
     }

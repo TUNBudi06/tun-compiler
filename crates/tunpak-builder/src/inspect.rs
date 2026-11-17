@@ -18,7 +18,7 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
     let (d, _) = Dict::parse(dict_bytes)?;
     let mut s = String::new();
     let w = &mut s;
-    let sig = if sp.signature.is_empty() { "unsigned".to_string() } else { format!("signed (sign_len {})", sp.signature.len()) };
+    let sig = if sp.signature.is_empty() { "unsigned".to_string() } else { format!("signature present, not verified (sign_len {})", sp.signature.len()) };
     let _ = writeln!(w, "pak version {}  dict_offset {}  {}", h.version, h.dict_offset, sig);
     let x = &d.header;
     let _ = writeln!(
@@ -38,7 +38,7 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
         let h8: String = e.hash[..8].iter().map(|b| format!("{b:02x}")).collect();
         let _ = writeln!(
             w,
-            "  {:<3} {:<6} {:#04x}  {:?} {:?} {} {} {} {h8} {}{fl}",
+            "  {:<3} {:<6} {:#04x}  {:?} {:?} {} {} {} {h8} {:?}{fl}",
             e.ref_id, format!("{:?}", e.entry_type), e.flags, e.arch, e.platform, e.offset, e.size, e.orig_size, e.path
         );
     }
@@ -76,33 +76,33 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
     for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Lib) {
         match plain(pak, e)? {
             None => {
-                let _ = writeln!(w, "\n{} export table: <encrypted>", e.path);
+                let _ = writeln!(w, "\n{:?} export table: <encrypted>", e.path);
             }
             Some(body) => {
                 let (t, _) = LibTable::parse(&body)?;
-                let _ = writeln!(w, "\n{} exports ({}):", e.path, t.functions.len());
+                let _ = writeln!(w, "\n{:?} exports ({}):", e.path, t.functions.len());
                 for f in &t.functions {
-                    let _ = writeln!(w, "  fn {} {} argc {} ret {:?}", f.fn_id, f.name, f.arg_count, f.ret_type);
+                    let _ = writeln!(w, "  fn {} {:?} argc {} ret {:?}", f.fn_id, f.name, f.arg_count, f.ret_type);
                 }
             }
         }
     }
     for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Tzst) {
         let Some(body) = plain(pak, e)? else {
-            let _ = writeln!(w, "\n{} <encrypted>", e.path);
+            let _ = writeln!(w, "\n{:?} <encrypted>", e.path);
             continue;
         };
         let (t, _) = TzstFile::parse(&body)?;
-        let _ = writeln!(w, "\n{} fn table ({}):", e.path, t.fns.len());
+        let _ = writeln!(w, "\n{:?} fn table ({}):", e.path, t.fns.len());
         for (id, f) in t.fns.iter().enumerate() {
-            let _ = writeln!(w, "  fn {id} {} argc {} addr {}", f.name, f.argc, f.addr);
+            let _ = writeln!(w, "  fn {id} {:?} argc {} addr {}", f.name, f.argc, f.addr);
         }
-        let _ = writeln!(w, "{} imports ({}):", e.path, t.imports.len());
+        let _ = writeln!(w, "{:?} imports ({}):", e.path, t.imports.len());
         for (i, p) in t.imports.iter().enumerate() {
-            let _ = writeln!(w, "  {i} {p}");
+            let _ = writeln!(w, "  {i} {p:?}");
         }
         let dis = tunpak_tzst::disassemble(&t.tun.code, &t.tun.consts, t.tun.header.width).map_err(|err| BuildError::Script { path: e.path.clone(), err })?;
-        let _ = writeln!(w, "{} disassembly:\n{dis}", e.path);
+        let _ = writeln!(w, "{:?} disassembly:\n{dis}", e.path);
     }
     Ok(s)
 }

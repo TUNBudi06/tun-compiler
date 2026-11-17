@@ -4,6 +4,7 @@ use super::ops::OOB;
 use super::{Fault, R};
 use crate::{ExecError, EXIT_PERM_DENIED};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -126,12 +127,18 @@ fn timeout() -> Fault {
 /// `limit` caps the size of the resulting file (memory accounting).
 pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Instant, limit: u64) -> R<()> {
     let end = off.checked_add(data.len() as u64).ok_or("write offset overflow")?;
-    let existing = if off > 0 {
-        match std::fs::read(p) {
-            Ok(v) => v,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(format!("cannot write '{shown}': {e}").into()),
-        }
+    let meta = match std::fs::metadata(p) {
+        Ok(m) if m.is_dir() => return Err(format!("cannot write '{shown}': is a directory").into()),
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot write '{shown}': {e}").into()),
+    };
+    // Size check BEFORE reading the old content into memory.
+    if end.max(if off > 0 { meta.as_ref().map_or(0, |m| m.len()) } else { 0 }) > limit {
+        return Err("out of memory".into());
+    }
+    let existing = if off > 0 && meta.is_some() {
+        std::fs::read(p).map_err(|e| format!("cannot write '{shown}': {e}"))?
     } else {
         Vec::new()
     };
@@ -154,6 +161,7 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))
             .open(&tmp)
             .map_err(|e| format!("cannot write '{shown}': {e}"))?;
         for chunk in content.chunks(CHUNK) {
@@ -166,8 +174,8 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
             return Err(timeout());
         }
         f.sync_all().map_err(|e| format!("cannot write '{shown}': {e}"))?;
-        if let Ok(m) = std::fs::metadata(p) {
-            let _ = f.set_permissions(m.permissions());
+        if let Some(m) = &meta {
+            let _ = f.set_permissions(m.permissions()); // undo umask narrowing
         }
         drop(f);
         std::fs::rename(&tmp, p).map_err(|e| format!("cannot write '{shown}': {e}"))?;
@@ -177,4 +185,49 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
         let _ = std::fs::remove_file(&tmp);
     }
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn dl() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+    fn dir(n: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tunpak-fsio-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn write_to_directory_rejected() {
+        let d = dir("isdir");
+        assert!(write_atomic(&d, "d", b"x", 0, dl(), 1 << 20).is_err());
+        assert!(d.is_dir());
+    }
+
+    #[test]
+    fn size_checked_before_reading_old_content() {
+        let d = dir("big");
+        let f = d.join("f");
+        std::fs::File::create(&f).unwrap().set_len(1 << 30).unwrap(); // sparse 1 GiB
+        assert!(write_atomic(&f, "f", b"x", 1, dl(), 1 << 20).is_err());
+    }
+
+    #[test]
+    fn mode_preserved_and_new_file_private() {
+        let d = dir("mode");
+        let f = d.join("f");
+        std::fs::write(&f, b"abc").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&f, "f", b"zz", 1, dl(), 1 << 20).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"azz");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o640);
+        let g = d.join("g");
+        write_atomic(&g, "g", b"x", 0, dl(), 1 << 20).unwrap();
+        assert_eq!(std::fs::metadata(&g).unwrap().permissions().mode() & 0o077, 0);
+    }
 }

@@ -68,7 +68,7 @@ pub fn check_lfnt(lfnt: &[u8]) -> Result<LibTable, BuildError> {
 pub fn load_lib(path: &Path, data: &[u8]) -> Result<LibInfo, BuildError> {
     let name = path.display().to_string();
     let arch = elf_arch(data, &name)?;
-    let platform = if name.contains("termux") { Platform::Termux } else { Platform::LinuxGlibc };
+    let platform = if path.file_name().is_some_and(|f| f.to_string_lossy().contains("termux")) { Platform::Termux } else { Platform::LinuxGlibc };
     if arch != Arch::Any && arch != host_arch() {
         let side = path.with_extension("lfnt");
         let lfnt = std::fs::read(&side)

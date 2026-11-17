@@ -11,7 +11,6 @@ pub mod sign;
 pub enum CryptoError {
     BadSignature,
     BadKey,
-    HashMismatch,
     DecryptFailed,
     DecompressFailed { detail: String },
     TooLarge,
@@ -24,7 +23,6 @@ impl std::fmt::Display for CryptoError {
         match self {
             Self::BadSignature => write!(f, "signature verification failed"),
             Self::BadKey => write!(f, "invalid key"),
-            Self::HashMismatch => write!(f, "hash mismatch"),
             Self::DecryptFailed => write!(f, "decryption failed (wrong key/passphrase or corrupted data)"),
             Self::DecompressFailed { detail } => write!(f, "decompression failed: {detail}"),
             Self::TooLarge => write!(f, "data too large"),

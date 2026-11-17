@@ -1,5 +1,6 @@
 //! Pure value operations (no VM state). Errors are plain messages → catchable runtime errors.
 use super::vars::{stringify, values_equal, Value};
+use crate::stdlib::hex;
 use std::cmp::Ordering;
 use tunpak_format::opcodes::Opcode;
 
@@ -75,8 +76,8 @@ pub fn arith(op: Opcode, a: Value, b: Value) -> Result<Value, String> {
 pub fn compare(op: Opcode, a: &Value, b: &Value) -> Result<bool, String> {
     use Opcode as O;
     match op {
-        O::Eq => return Ok(values_equal(a, b)),
-        O::Ne => return Ok(!values_equal(a, b)),
+        O::Eq => return values_equal(a, b),
+        O::Ne => return values_equal(a, b).map(|e| !e),
         _ => {}
     }
     let ord = match (a, b) {
@@ -117,14 +118,6 @@ pub fn parse_int_lenient(s: &str) -> i64 {
     }
 }
 
-pub fn hex_lower(b: &[u8]) -> String {
-    let mut s = String::with_capacity(b.len() * 2);
-    for x in b {
-        s.push_str(&format!("{x:02x}"));
-    }
-    s
-}
-
 /// CAST types: 1=int 2=str 3=hex 4=buf.
 pub fn cast(v: &Value, ty: u8) -> Result<Value, String> {
     match (ty, v) {
@@ -132,7 +125,7 @@ pub fn cast(v: &Value, ty: u8) -> Result<Value, String> {
         (1, Value::Str(s)) => Ok(Value::Int(parse_int_lenient(s))),
         (1, _) => Err(format!("cannot cast {} to int", v.type_name())),
         (2, _) => Ok(Value::str(stringify(v))),
-        (3, Value::Buf(b)) => Ok(Value::str(hex_lower(b))),
+        (3, Value::Buf(b)) => Ok(Value::str(hex::encode(b))),
         (3, Value::Int(n)) => Ok(Value::str(format!("{n:x}"))),
         (3, _) => Err(format!("cannot cast {} to hex", v.type_name())),
         (4, Value::Buf(_)) => Ok(v.clone()),

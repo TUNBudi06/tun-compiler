@@ -9,12 +9,13 @@ const USAGE: &str = "usage (distributor first run, in order):
   1. tunpak keygen [-o <dir>] [--force]
      tunpak keygen --rotate -i <identity.tzid>
      tunpak keygen --revoke <key id> -i <identity.tzid>
-  2. tunpak setup-server --url <http://host[:port]> -i <identity.tzid> [-o <dir>] [--cache-ttl SECS] [--force]   (key_mode 2 only)
+  2. tunpak setup-server --url <http://host[:port]> -i <identity.tzid> [-o <dir>] [--cache-ttl SECS] [--force]   (key_mode 2 only; --force keeps master.key and licenses, rewrites only server.tsrv)
      tunpak setup-server --add-license -i <identity.tzid> [-o <dir>]
   3. tunpak setup-user -i <identity.tzid> [--author-id N] [--name TEXT]
   4. tunpak gen-generator -i <identity.tzid> -o <dir> [--key <id>]
   5. tunpak gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>
                          [--master-key <master.key> | --server-config <server.tsrv>]
+                         [--build-token <file>]   (else env TUNPAK_BUILD_TOKEN)
      targets: x64-linux, arm64-linux, x64-termux, arm64-termux
 other commands:
   tunpak build <dir> -o <out.pak> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
@@ -125,13 +126,17 @@ fn gen_generator(args: &[String]) -> Result<(), BuildError> {
 
 /// Returns the process exit code.
 fn gen_executor(args: &[String]) -> Result<i32, BuildError> {
-    let m = flags(args, &["-i", "--server", "--target", "-o", "--master-key", "--server-config"], &[])?;
+    let m = flags(args, &["-i", "--server", "--target", "-o", "--master-key", "--server-config", "--build-token"], &[])?;
     let (Some(id), Some(server), Some(t), Some(out)) = (m.get("-i"), m.get("--server"), m.get("--target"), m.get("-o")) else {
         return msg("usage: tunpak gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>");
     };
     let master = m.get("--master-key").map(|p| keys::read_master_key(Path::new(p))).transpose()?;
     let tsrv = m.get("--server-config").map(|p| std::fs::read(p).map_err(|e| BuildError::Io(format!("cannot read {p}: {e}")))).transpose()?;
-    let ok = distrib::gen_executor(Path::new(id), server, distrib::parse_targets(t)?, Path::new(out), master, tsrv)?;
+    let token = match m.get("--build-token") {
+        Some(p) => Some(std::fs::read_to_string(p).map_err(|e| BuildError::Io(format!("cannot read {p}: {e}")))?.trim().to_string()),
+        None => std::env::var("TUNPAK_BUILD_TOKEN").ok(),
+    };
+    let ok = distrib::gen_executor(Path::new(id), server, distrib::parse_targets(t)?, Path::new(out), master, tsrv, token)?;
     Ok(if ok { 0 } else { 1 })
 }
 
@@ -157,7 +162,7 @@ fn keygen(args: &[String]) -> Result<(), BuildError> {
             keys::revoke(&id, k)?;
             println!("key {k} revoked");
         } else {
-            let k = keys::rotate(&id, &passphrase(false)?)?;
+            let k = keys::rotate(&id, &passphrase(true)?)?;
             println!("new signing key {k}");
         }
         return Ok(());

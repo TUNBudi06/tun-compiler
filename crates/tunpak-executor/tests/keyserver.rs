@@ -75,8 +75,9 @@ fn server_down_no_url_and_bad_key_length() {
     let short = fake_key_server(|_, _| (200, vec![1; 31]));
     let e = run(&p, &opts(&k, &short.url, Some("lic-ok")), "").err_msg();
     assert!(e.contains("invalid key"), "{e}");
-    let https = run(&p, &opts(&k, "https://example.invalid", Some("x")), "").err_msg();
-    assert!(https.contains("https://") && https.contains("not supported"), "{https}");
+    // Remote hosts must use https: plain http is refused before any connection (no network needed).
+    let remote = run(&p, &opts(&k, "http://example.invalid", Some("x")), "").err_msg();
+    assert!(remote.contains("only allowed on loopback"), "{remote}");
 }
 
 #[test]

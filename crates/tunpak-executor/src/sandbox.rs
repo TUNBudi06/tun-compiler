@@ -23,7 +23,8 @@ extern "C" fn on_signal(sig: libc::c_int) {
 // (or blocked in wait), so running it from the watcher would need a cancellation hook in the VM.
 pub fn install_signal_cleanup() {
     let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    // O_CLOEXEC: RUN/LOAD_SRV children must not inherit the write end (a stray byte would kill us).
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return;
     }
     SIG_PIPE_W.store(fds[1], Ordering::Relaxed);
@@ -35,7 +36,7 @@ pub fn install_signal_cleanup() {
         let mut b = 0u8;
         while unsafe { libc::read(r, &mut b as *mut u8 as *mut _, 1) } != 1 {}
         for pid in PIDS.lock().map(|p| p.clone()).unwrap_or_default() {
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            kill_group(pid);
         }
         for d in DIRS.lock().map(|d| d.clone()).unwrap_or_default() {
             let _ = std::fs::remove_dir_all(d);
@@ -43,6 +44,16 @@ pub fn install_signal_cleanup() {
         let sig = b as i32;
         unsafe { libc::_exit(if sig == libc::SIGINT { crate::EXIT_CANCELLED } else { 128 + sig }) };
     });
+}
+
+/// LOAD_SRV children run in their own process group (pgid == pid, set in run_exec's pre_exec); kill
+/// the whole group so grandchildren die too. RUN children are not group leaders: `-pid` is then a
+/// harmless ESRCH and the plain pid kill does the work.
+pub fn kill_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -98,9 +109,9 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         PIDS.lock().unwrap().retain(|&p| p != self.0.id());
-        if matches!(self.0.try_wait(), Ok(None)) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
+        // Always signal the group: the child may have exited leaving `sleep 1000 &` behind.
+        // (A reaped pid could in theory be reused; the group kill then hits nothing or ESRCH.)
+        kill_group(self.0.id());
+        let _ = self.0.wait();
     }
 }

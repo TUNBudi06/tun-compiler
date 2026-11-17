@@ -182,10 +182,10 @@ start { let @r = add(1, 2); let (@p, @q) = pair(@r); early(1); print f\"{add(@p,
     let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
     let first_fn = o.file.fns[0].addr as usize;
     assert_eq!(ins.iter().find(|i| i.next == first_fn).unwrap().op, O::Halt);
-    assert!(o.file.fns.windows(2).all(|w| w[0].addr <= w[1].addr));
+    assert!(o.file.fns.windows(2).all(|w| w[0].addr < w[1].addr));
     // library script: no start block -> just HALT then functions
     let lib = ok("fn f() { }");
-    assert_eq!((lib.file.tun.code.clone(), lib.file.fns[0].addr), (vec![0, 3], 2));
+    assert_eq!((lib.file.tun.code.clone(), lib.file.fns[0].addr), (vec![0, 3, 0, 0xBF], 2));
 }
 
 #[test]

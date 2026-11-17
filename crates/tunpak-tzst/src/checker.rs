@@ -267,6 +267,9 @@ impl Ck {
         let pos = s.pos;
         match &s.k {
             SK::Let(n, x) | SK::Assign(n, x) => {
+                if matches!(s.k, SK::Assign(..)) && !self.defined.contains(n) {
+                    return Err(e(pos, format!("assignment to undeclared @{n} (use let)")));
+                }
                 self.expr(x)?;
                 self.defined.insert(n.clone());
             }

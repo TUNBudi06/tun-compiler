@@ -221,7 +221,13 @@ fn quote(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Output byte budget: a shared DAG (`a=[a,a]`) would otherwise expand exponentially.
+const MAX_OUT: usize = 16 * 1024 * 1024;
+
 pub fn stringify(v: &Value, depth: usize, out: &mut String) -> Result<(), String> {
+    if out.len() > MAX_OUT {
+        return Err(format!("json stringify: output larger than {MAX_OUT} bytes"));
+    }
     if depth > MAX_DEPTH {
         return Err(format!("json stringify: nesting deeper than {MAX_DEPTH}"));
     }
@@ -356,5 +362,15 @@ mod tests {
         let mut o = String::new();
         stringify(&Value::Tuple(Rc::new(vec![Value::Int(1), Value::Null])), 0, &mut o).unwrap();
         assert_eq!(o, "[1,null]");
+    }
+
+    #[test]
+    fn stringify_output_budget() {
+        let mut a = Value::Int(1);
+        for _ in 0..100 {
+            a = Value::Tuple(Rc::new(vec![a.clone(), a]));
+        }
+        let mut o = String::new();
+        assert!(stringify(&a, 0, &mut o).unwrap_err().contains("output larger"));
     }
 }

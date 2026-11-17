@@ -18,7 +18,7 @@ pub fn check_hash(e: &Entry, stored: &[u8]) -> Result<(), ExecError> {
     if hash::hash_eq(&hash::sha256(stored), &e.hash) {
         Ok(())
     } else {
-        Err(refuse(format!("{}{}{}", ob!("entry '"), e.path, ob!("' is corrupted (hash mismatch)"))))
+        Err(refuse(format!("{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("' is corrupted (hash mismatch)"))))
     }
 }
 
@@ -34,11 +34,11 @@ pub fn open_entry(e: &Entry, stored: &[u8], h: &DictHeader, trust: &Trust, licen
     let tun = e.entry_type == EntryType::Tun;
     let (head, body) = if tun {
         if stored.len() < TUN_HEADER_LEN {
-            return Err(refuse(format!("{}{}{}", ob!("entry '"), e.path, ob!("': main.tun shorter than its header"))));
+            return Err(refuse(format!("{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': main.tun shorter than its header"))));
         }
         let mirror = stored[TUN_OFF_FLAGS] & (TUN_COMPRESSED | TUN_ENCRYPTED);
         if mirror != e.flags & (ENTRY_COMPRESSED | ENTRY_ENCRYPTED) {
-            return Err(refuse(format!("{}{}{}", ob!("entry '"), e.path, ob!("': main.tun header flags do not mirror the dict flags"))));
+            return Err(refuse(format!("{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': main.tun header flags do not mirror the dict flags"))));
         }
         stored.split_at(TUN_HEADER_LEN)
     } else {
@@ -46,20 +46,20 @@ pub fn open_entry(e: &Entry, stored: &[u8], h: &DictHeader, trust: &Trust, licen
     };
     let want = (e.orig_size as usize)
         .checked_sub(head.len())
-        .ok_or_else(|| refuse(format!("{}{}{}", ob!("entry '"), e.path, ob!("': orig_size smaller than its header"))))?;
+        .ok_or_else(|| refuse(format!("{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': orig_size smaller than its header"))))?;
     let mut data: Vec<u8> = body.to_vec();
     if encrypted {
         let key = keysource::entry_key(h, trust, license, cache)
-            .map_err(|err| refuse(format!("{}{}{}{}", ob!("entry '"), e.path, ob!("': "), err.msg)))?;
+            .map_err(|err| refuse(format!("{}{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': "), err.msg)))?;
         let aad = hkdf::entry_aad(h.app_id, e.ref_id, e.entry_type.into());
         data = encrypt::decrypt(&key, &e.nonce, &aad, &data)
-            .map_err(|err| refuse(format!("{}{}{}{err}", ob!("entry '"), e.path, ob!("': "))))?;
+            .map_err(|err| refuse(format!("{}{}{}{err}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': "))))?;
     }
     if compressed {
-        data = compress::decompress(&data, want).map_err(|err| refuse(format!("{}{}{}{err}", ob!("entry '"), e.path, ob!("': "))))?;
+        data = compress::decompress(&data, want).map_err(|err| refuse(format!("{}{}{}{err}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': "))))?;
     }
     if data.len() != want {
-        return Err(refuse(format!("{}{}{}{}{}{}", ob!("entry '"), e.path, ob!("': size "), data.len() + head.len(), ob!(" does not match orig_size "), e.orig_size)));
+        return Err(refuse(format!("{}{}{}{}{}{}", ob!("entry '"), crate::perm::escape(&e.path), ob!("': size "), data.len() + head.len(), ob!(" does not match orig_size "), e.orig_size)));
     }
     if !tun {
         return Ok(data);

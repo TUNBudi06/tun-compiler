@@ -83,6 +83,10 @@ pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile
     g.ins(O::Halt, &[])?;
     let mut fns = vec![];
     for f in &p.fns {
+        if f.params.len() > 255 {
+            return Err(CompileError::new(f.pos.0, f.pos.1, format!("function '{}' has more than 255 parameters", f.name)));
+        }
+        let start = g.code.len();
         fns.push(FnInfo { addr: g.code.len() as u32, argc: f.params.len() as u8, name: f.name.clone() });
         g.new_scope(&f.params, &f.body);
         g.pos = f.pos;
@@ -95,6 +99,10 @@ pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile
         }
         g.ret_jumps.clear();
         g.block(&f.body)?;
+        // an empty body would share its addr with the next fn (executor maps addr -> fn)
+        if g.code.len() == start {
+            g.ins(O::Nop, &[])?;
+        }
         let end = g.code.len();
         for s in std::mem::take(&mut g.ret_jumps) {
             g.patch(s, end);

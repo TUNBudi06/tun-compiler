@@ -116,8 +116,12 @@ fn regex_cases_and_step_budget() {
     assert_eq!(ok("std/regex", "match", &[S("dog"), S("^(cat|dog|bird)$")]), "1");
     assert_eq!(ok("std/regex", "match", &[S("fish"), S("^(cat|dog|bird)$")]), "0");
     assert_eq!(ok("std/regex", "match", &[S("ab"), S("^[^0-9]{2}$")]), "1");
+    // The classic bomb is linear with (pc,pos) memoization: a correct "no match".
     let bomb: &'static str = Box::leak(("a".repeat(45) + "!").into_boxed_str());
-    let e = fails("std/regex", "match", &[S(bomb), S("^(a+)+$")]);
+    assert_eq!(ok("std/regex", "match", &[S(bomb), S("^(a+)+$")]), "0");
+    // Unanchored search is still O(n^2): that is what the step budget bounds.
+    let long: &'static str = Box::leak("a".repeat(3000).into_boxed_str());
+    let e = fails("std/regex", "match", &[S(long), S("(a|b)*c")]);
     assert!(e.contains("regex too complex"), "{e}");
     assert!(fails("std/regex", "match", &[S("x"), S("\\bx")]).contains("unsupported syntax \\b"));
 }

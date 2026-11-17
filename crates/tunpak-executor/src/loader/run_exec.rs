@@ -69,17 +69,17 @@ pub fn prepare(
     let base = e.path.rsplit('/').next().unwrap_or("exe");
     let final_path = sb.dir().join(format!("{:04x}-{base}", e.ref_id));
     let part = sb.dir().join(format!("{:04x}.part", e.ref_id));
-    {
+    let extract = || -> std::io::Result<()> {
         // Atomic write: temp name + rename.
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&part)
-            .map_err(|x| io_err("cannot extract entry", x))?;
-        f.write_all(&data).map_err(|x| io_err("cannot extract entry", x))?;
-    }
-    std::fs::rename(&part, &final_path).map_err(|x| io_err("cannot extract entry", x))?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(&part)?;
+        f.write_all(&data)?;
+        drop(f);
+        std::fs::rename(&part, &final_path)
+    };
+    extract().map_err(|x| {
+        let _ = std::fs::remove_file(&part); // else the next RUN of this entry hits AlreadyExists
+        io_err("cannot extract entry", x)
+    })?;
     Ok(Prepared { exe: final_path, shown: e.path.clone(), argv })
 }
 
@@ -87,13 +87,19 @@ pub fn spawn(p: &Prepared, piped_stdout: bool) -> Result<ChildGuard, ExecError> 
     let mut tries = 0;
     loop {
         let mut c = Command::new(&p.exe);
+        let own_group = piped_stdout; // LOAD_SRV only
         c.args(&p.argv);
         #[cfg(any(target_os = "linux", target_os = "android"))]
         unsafe {
             use std::os::unix::process::CommandExt;
             // The child must not outlive a killed executor.
-            c.pre_exec(|| {
+            c.pre_exec(move || {
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // shortcut: RUN grandchildren that detach survive a timeout kill; RUN stays in the tty's process group so interactive apps work
+                // LOAD_SRV children are background services: own group so the whole tree can be killed.
+                if own_group {
+                    libc::setpgid(0, 0);
+                }
                 Ok(())
             });
         }
@@ -118,9 +124,19 @@ pub fn run(
     r: u64,
     var: &dyn Fn(u8) -> Result<String, ExecError>,
     io: &mut Io,
+    deadline: std::time::Instant,
 ) -> Result<i32, ExecError> {
     let p = prepare(svc, r, "RUN", var, io)?;
     let mut guard = spawn(&p, false)?;
-    let st = guard.0.wait().map_err(|x| io_err("wait failed", x))?;
+    // Poll against the script's deadline; the guard kills the process group on every error return.
+    let st = loop {
+        if let Some(st) = guard.0.try_wait().map_err(|x| io_err("wait failed", x))? {
+            break st;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ExecError::new(EXIT_ERROR, format!("RUN of '{}' killed: script timeout", perm::escape(&p.shown))));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
     Ok(st.code().or_else(|| st.signal().map(|s| 128 + s)).unwrap_or(EXIT_ERROR))
 }

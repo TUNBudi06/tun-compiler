@@ -17,7 +17,7 @@ fn err<T>(s: impl Into<String>) -> Result<T, BuildError> {
 /// `http://host[:port][/base]` -> (host:port, base without trailing '/').
 pub fn parse_url(url: &str) -> Result<(String, String), BuildError> {
     if url.starts_with("https://") {
-        return err("https:// is not supported (plain HTTP only); put a TLS reverse proxy or tunnel in front and use its http:// side");
+        return err("https:// is not supported (plain HTTP only); use an SSH tunnel to localhost and an http://localhost:PORT url");
     }
     let Some(rest) = url.strip_prefix("http://") else { return err(format!("'{url}': URL must be http://host[:port][/base]")) };
     let (host, base) = rest.find('/').map_or((rest, ""), |i| (&rest[..i], &rest[i..]));

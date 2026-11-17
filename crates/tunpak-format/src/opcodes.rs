@@ -161,13 +161,6 @@ impl Opcode {
     pub fn write(self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self as u16).to_be_bytes());
     }
-    /// Read 2 bytes big-endian; returns (opcode, 2).
-    pub fn read(bytes: &[u8]) -> Result<(Opcode, usize), FormatError> {
-        let b = bytes
-            .get(..2)
-            .ok_or(FormatError::Truncated { what: "opcode", offset: bytes.len() })?;
-        Ok((Opcode::try_from(u16::from_be_bytes([b[0], b[1]]))?, 2))
-    }
 }
 
 // `<src>` markers (spec/02).
@@ -187,31 +180,6 @@ pub fn write_src_const(idx: u64, out: &mut Vec<u8>) {
     } else {
         out.push(SRC_CONST_ESCAPE);
         crate::varint::encode(idx, out);
-    }
-}
-
-/// Decode a const-pool `<src>` whose marker byte (high bit set, not 0xFF) was already read;
-/// `rest` is the bytes after the marker. Returns (index, bytes consumed from `rest`).
-pub fn read_src_const(marker: u8, rest: &[u8]) -> Result<(u64, usize), crate::FormatError> {
-    if marker == SRC_CONST_ESCAPE {
-        crate::varint::decode(rest)
-    } else {
-        Ok(((marker & 0x7F) as u64, 0))
-    }
-}
-
-#[cfg(test)]
-mod src_const_tests {
-    use super::*;
-    #[test]
-    fn const_src_round_trip() {
-        for i in [0u64, 1, 0x7D, 0x7E, 0x7F, 128, 70_000] {
-            let mut b = Vec::new();
-            write_src_const(i, &mut b);
-            assert_ne!(b[0], SRC_STACK);
-            let (got, n) = read_src_const(b[0], &b[1..]).unwrap();
-            assert_eq!((got, n + 1), (i, b.len()));
-        }
     }
 }
 
@@ -260,7 +228,6 @@ mod tests {
             let mut o = vec![];
             op.write(&mut o);
             assert_eq!(o, v.to_be_bytes());
-            assert_eq!(Opcode::read(&o).unwrap(), (op, 2));
         }
     }
 
@@ -281,7 +248,6 @@ mod tests {
     fn rejects_unknown_and_short() {
         assert!(Opcode::try_from(0x0000).is_err());
         assert!(Opcode::try_from(0xFFFF).is_err());
-        assert!(Opcode::read(&[0x00]).is_err());
         assert_eq!(Opcode::from_mnemonic("NOPE"), None);
     }
 

@@ -5,6 +5,13 @@ use std::rc::Rc;
 
 /// Max container nesting depth; keeps recursive walks and recursive `Drop` off the stack limit.
 pub const MAX_NEST: usize = 1000;
+/// Nesting is enforced exactly for the stored value, and for the whole live heap every
+/// `NEST_SLACK` levels of newly stored depth (the VM calls `check_nesting`), so no live value is
+/// deeper than `HARD_NEST`. Recursive walks (deep_size, eq) are correct within that bound.
+pub const NEST_SLACK: usize = 1024;
+pub const HARD_NEST: usize = MAX_NEST + 2 * NEST_SLACK;
+/// Max node-pair visits for one `==`; a shared-subtree DAG could otherwise take 2^depth steps.
+const EQ_BUDGET: u32 = 1 << 22;
 /// Max depth printed by stringify; deeper containers print as `...`.
 pub const PRINT_DEPTH: usize = 16;
 /// Bytes of a buf shown by the print preview.
@@ -169,6 +176,10 @@ fn fmt_value(v: &Value, depth: usize, nested: bool, out: &mut String) {
         Value::Arr(a) => {
             out.push('[');
             for (i, x) in a.borrow().iter().enumerate() {
+                if out.len() > MAX_PRINT {
+                    out.push_str("...");
+                    break;
+                }
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -179,6 +190,10 @@ fn fmt_value(v: &Value, depth: usize, nested: bool, out: &mut String) {
         Value::Object(o) => {
             out.push('{');
             for (i, (k, x)) in o.borrow().iter().enumerate() {
+                if out.len() > MAX_PRINT {
+                    out.push_str("...");
+                    break;
+                }
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -191,6 +206,10 @@ fn fmt_value(v: &Value, depth: usize, nested: bool, out: &mut String) {
         Value::Tuple(t) => {
             out.push('(');
             for (i, x) in t.iter().enumerate() {
+                if out.len() > MAX_PRINT {
+                    out.push_str("...");
+                    break;
+                }
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -203,47 +222,90 @@ fn fmt_value(v: &Value, depth: usize, nested: bool, out: &mut String) {
 
 // ---------- equality ----------
 
-/// `==`: different types are simply unequal; containers compare structurally.
-pub fn values_equal(a: &Value, b: &Value) -> bool {
-    eq_depth(a, b, 0)
+/// `==`: different types are simply unequal; containers compare structurally. Errors when the
+/// comparison exceeds its step budget (shared-subtree DAGs).
+pub fn values_equal(a: &Value, b: &Value) -> Result<bool, String> {
+    let mut budget = EQ_BUDGET;
+    eq_depth(a, b, 0, &mut budget)
 }
 
-fn eq_depth(a: &Value, b: &Value, d: usize) -> bool {
-    if d > MAX_NEST + 1 {
-        return false;
+fn eq_depth(a: &Value, b: &Value, d: usize, budget: &mut u32) -> Result<bool, String> {
+    if d > HARD_NEST + 1 {
+        return Ok(false);
     }
-    match (a, b) {
+    if matches!(a, Value::Arr(_) | Value::Object(_) | Value::Tuple(_)) {
+        *budget = budget.checked_sub(1).ok_or("comparison too complex (shared nested containers)")?;
+    }
+    Ok(match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Buf(x), Value::Buf(y)) => x == y,
         (Value::Arr(x), Value::Arr(y)) => {
-            Rc::ptr_eq(x, y) || {
-                let (x, y) = (x.borrow(), y.borrow());
-                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| eq_depth(p, q, d + 1))
+            if Rc::ptr_eq(x, y) {
+                return Ok(true);
             }
+            let (x, y) = (x.borrow(), y.borrow());
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (p, q) in x.iter().zip(y.iter()) {
+                if !eq_depth(p, q, d + 1, budget)? {
+                    return Ok(false);
+                }
+            }
+            true
         }
         (Value::Tuple(x), Value::Tuple(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| eq_depth(p, q, d + 1))
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (p, q) in x.iter().zip(y.iter()) {
+                if !eq_depth(p, q, d + 1, budget)? {
+                    return Ok(false);
+                }
+            }
+            true
         }
         (Value::Object(x), Value::Object(y)) => {
-            Rc::ptr_eq(x, y) || {
-                let (x, y) = (x.borrow(), y.borrow());
-                x.len() == y.len()
-                    && x.iter().all(|(k, v)| y.get(k).map_or(false, |w| eq_depth(v, w, d + 1)))
+            if Rc::ptr_eq(x, y) {
+                return Ok(true);
             }
+            let (x, y) = (x.borrow(), y.borrow());
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (k, v) in x.iter() {
+                match y.get(k) {
+                    Some(w) if eq_depth(v, w, d + 1, budget)? => {}
+                    _ => return Ok(false),
+                }
+            }
+            true
         }
         _ => false,
-    }
+    })
 }
 
 // ---------- circular / nesting check ----------
 
 /// Called before storing `v` into a container. Errors `circular reference` if `v` transitively
 /// contains `target` (the container being written to), `nesting too deep` past MAX_NEST.
-pub fn check_store(v: &Value, target: Option<*const ()>) -> Result<(), String> {
+/// Returns the depth of `v` (0 for scalars).
+pub fn check_store(v: &Value, target: Option<*const ()>) -> Result<usize, String> {
     let mut memo = HashMap::new();
-    walk(v, target, 0, &mut memo).map(|_| ())
+    walk(v, target, 0, &mut memo)
+}
+
+/// Whole-heap nesting check over the VM roots: `nesting too deep` if any value exceeds MAX_NEST.
+pub fn check_nesting<'a>(roots: impl Iterator<Item = &'a Value>) -> Result<(), String> {
+    let mut memo = HashMap::new();
+    for v in roots {
+        if walk(v, None, 0, &mut memo)? > MAX_NEST {
+            return Err("nesting too deep".into());
+        }
+    }
+    Ok(())
 }
 
 fn walk(v: &Value, target: Option<*const ()>, level: usize, memo: &mut HashMap<*const (), usize>) -> Result<usize, String> {
@@ -299,7 +361,7 @@ pub fn shallow_size(v: &Value) -> u64 {
 
 /// Approximate live size (shared containers counted once).
 pub fn deep_size(v: &Value, seen: &mut HashSet<*const ()>, level: usize) -> u64 {
-    if level > MAX_NEST + 1 {
+    if level > HARD_NEST + 1 {
         return 0;
     }
     let own = shallow_size(v);

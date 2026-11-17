@@ -76,9 +76,9 @@ fn setup_server_layout_and_license() {
     let (cfg, _) = ServerConfig::parse(&fs::read(out.join("server.tsrv")).unwrap()).unwrap();
     assert_eq!((cfg.cache_policy, cfg.cache_ttl), (0, 0));
 
-    // https refused
-    let bad = run(&["setup-server", "--url", "https://k", "-i", s(&id), "-o", s(&tmp("ss-https"))]);
-    assert!(!bad.status.success() && String::from_utf8_lossy(&bad.stderr).contains("https"));
+    // https accepted (server config only), non-http(s) refused
+    ok(&run(&["setup-server", "--url", "https://k", "-i", s(&id), "-o", s(&tmp("ss-https"))]));
+    assert!(!run(&["setup-server", "--url", "ftp://k", "-i", s(&id), "-o", s(&tmp("ss-ftp"))]).status.success());
 
     // licenses: printed once, only the hash stored
     let l1 = ok(&run(&["setup-server", "--add-license", "-i", s(&id), "-o", s(&out)])).trim().to_string();
@@ -306,4 +306,39 @@ fn key_mode_2_pak_runs_through_executor_with_fake_key_server() {
     h.join().unwrap();
     assert!(matches!(res, Ok(0)), "{res:?} {}", String::from_utf8_lossy(&err));
     assert!(String::from_utf8_lossy(&out).contains("done"));
+}
+
+#[test]
+fn gen_executor_build_token_and_master_key_http_guard() {
+    let (dir, id) = new_id("ge-tok");
+    let out = tmp("ge-tok-out");
+    let tokf = dir.join("tok");
+    fs::write(&tokf, "sekret\n").unwrap();
+    let (url, h) = serve(|hd, _| {
+        assert_eq!(hd["x-tunpak-build-token"], "sekret");
+        (403, b"no".to_vec())
+    });
+    let o = run(&["gen-executor", "-i", s(&id), "--server", &url, "--target", "x64-linux", "-o", s(&out), "--build-token", s(&tokf)]);
+    h.join().unwrap();
+    assert!(String::from_utf8_lossy(&o.stderr).contains("build token missing or wrong"));
+    // master key over plain http to a non-loopback host is refused before any connection
+    let o = run(&["gen-executor", "-i", s(&id), "--server", "http://example.invalid", "--target", "x64-linux", "-o", s(&out), "--master-key", s(&dir.join("master.key"))]);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("SSH tunnel"));
+}
+
+#[test]
+fn setup_server_force_keeps_master_and_licenses() {
+    let (d, id) = new_id("ss-force");
+    let sd = tmp("ss-force-srv");
+    ok(&run(&["setup-server", "--url", "http://k:1", "-i", s(&id), "-o", s(&sd)]));
+    ok(&run(&["setup-server", "--add-license", "-i", s(&id), "-o", s(&sd)]));
+    let app = fs::read_dir(sd.join("server-data/apps")).unwrap().next().unwrap().unwrap().path();
+    let (m, l) = (fs::read(app.join("master.key")).unwrap(), fs::read(app.join("licenses")).unwrap());
+    assert!(!l.is_empty());
+    ok(&run(&["setup-server", "--url", "http://other:2", "-i", s(&id), "-o", s(&sd), "--force"]));
+    assert_eq!((fs::read(app.join("master.key")).unwrap(), fs::read(app.join("licenses")).unwrap()), (m, l));
+    assert!(String::from_utf8_lossy(&fs::read(sd.join("server.tsrv")).unwrap()).contains("other:2"));
+    let o = run(&["setup-server", "--url", "http://bad\"x", "-i", s(&id), "-o", s(&sd), "--force"]);
+    assert!(!o.status.success());
+    let _ = d;
 }

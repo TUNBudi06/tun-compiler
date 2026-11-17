@@ -7,13 +7,14 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use tunpak_format::dict::{Dict, Perm, RunArg, RunExec};
-use tunpak_format::types::PermKind;
+use tunpak_format::types::{EntryType, PermKind};
 
 /// Make a maker-provided string safe to print: control characters (incl. ESC, CR, LF) and
 /// bidi/zero-width format characters become visible `\x..` / `\u{..}` escapes.
 pub fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+    let mut out = String::with_capacity(s.len().min(MAX_FIELD * 2));
+    let cut = s.char_indices().nth(MAX_FIELD).map_or(s.len(), |(i, _)| i);
+    for c in s[..cut].chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
@@ -22,13 +23,27 @@ pub fn escape(s: &str) -> String {
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
                 let _ = write!(out, "\\x{:02x}", c as u32);
             }
-            c if c.is_control() || matches!(c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF) => {
+            c if c.is_control() || is_invisible(c) => {
                 let _ = write!(out, "\\u{{{:x}}}", c as u32);
             }
             c => out.push(c),
         }
     }
+    if cut < s.len() {
+        let _ = write!(out, "\u{2026}(+{} bytes)", s.len() - cut);
+    }
     out
+}
+
+/// Max chars of one maker-provided field shown in full; the rest is summarized.
+const MAX_FIELD: usize = 200;
+
+/// Unicode Cf (format), Zl and Zp without a dependency: the assigned blocks that matter for spoofing.
+fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E
+        | 0x2060..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+        | 0xE0001 | 0xE0020..=0xE007F)
 }
 
 /// `name:idx` is how the builder stores a var arg (see run_exec); show only the name.
@@ -102,6 +117,9 @@ pub fn render_manifest(d: &Dict) -> String {
             }
         }
     }
+    for e in d.entries.iter().filter(|e| e.entry_type == EntryType::Lib) {
+        let _ = writeln!(s, "{}{}", ob!("Runs native library: "), escape(&e.path));
+    }
     s
 }
 
@@ -116,9 +134,10 @@ fn out_err(e: std::io::Error) -> ExecError {
 }
 
 /// Show the manifest and ask. `Ok(true)` = go ahead. Dev auto-approves without printing; an empty
-/// table needs no question.
+/// table (and no native lib) needs no question.
 pub fn approve_manifest(d: &Dict, opts: &RunOptions, io: &mut Io) -> Result<bool, ExecError> {
-    if opts.dev || d.perms.perms.is_empty() {
+    let has_lib = d.entries.iter().any(|e| e.entry_type == EntryType::Lib);
+    if opts.dev || (d.perms.perms.is_empty() && !has_lib) {
         return Ok(true);
     }
     write!(io.out, "{}", render_manifest(d)).map_err(out_err)?;

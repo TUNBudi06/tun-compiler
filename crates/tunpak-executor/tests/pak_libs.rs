@@ -53,7 +53,7 @@ fn run_script(ents: Vec<Ent>, script: tunpak_format::tzst::TzstFile) -> Run {
     let mut all = vec![Ent::tzst(8, "scripts/main.tzst", &script)];
     all.extend(ents);
     let pak = build(main_tun(vec![], vec![]), all, &Cfg { sign_with: Some(k.sk), ..Default::default() });
-    run_entry(&pak, "scripts/main.tzst", &base_opts(trust_for(&k, 1, None)), "")
+    run_entry(&pak, "scripts/main.tzst", &RunOptions { assume_yes: true, ..base_opts(trust_for(&k, 1, None)) }, "")
 }
 
 fn call_add_upper() -> tunpak_format::tzst::TzstFile {
@@ -68,7 +68,9 @@ fn call_add_upper() -> tunpak_format::tzst::TzstFile {
 fn lib_add_and_upper() {
     let Some(so) = so_bytes() else { return };
     let r = run_script(vec![lib_ent(&so, lfnt(ValueType::Int))], call_add_upper());
-    assert_eq!((r.res.clone(), r.out.as_str()), (Ok(0), "42\nABC\n"), "{}", r.err);
+    assert_eq!(r.res, Ok(0), "{}", r.err);
+    assert!(r.out.contains("Runs native library: lib/minimal.so"), "{}", r.out);
+    assert!(r.out.ends_with("42\nABC\n"), "{}", r.out);
 }
 
 fn expect_script_error(ents: Vec<Ent>, a: Asm, needle: &str) {
@@ -143,7 +145,7 @@ fn launcher_load_loads_libs_early() {
     exit_code(&mut c, 7);
     let main = main_tun(c, vec![Const::Str("ok".into())]);
     let cfg = Cfg { sign_with: Some(k.sk), ..Default::default() };
-    let opts = base_opts(trust_for(&k, 1, None));
+    let opts = RunOptions { assume_yes: true, ..base_opts(trust_for(&k, 1, None)) };
     let good = build(main.clone(), vec![lib_ent(&so, lfnt(ValueType::Int))], &cfg);
     assert_eq!(run(&good, &opts, "").res, Ok(7));
     let garbage = build(main, vec![lib_ent(b"junk", lfnt(ValueType::Int))], &cfg);

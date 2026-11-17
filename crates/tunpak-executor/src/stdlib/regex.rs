@@ -11,6 +11,8 @@ use crate::vm::vars::Value;
 const STEP_BUDGET: u64 = 2_000_000;
 const MAX_PROG: usize = 20_000;
 const MAX_REPEAT: u32 = 1000;
+const MAX_DEPTH: usize = 200;
+const MAX_OUT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 enum Item {
@@ -50,6 +52,7 @@ struct Parser {
     c: Vec<char>,
     i: usize,
     groups: usize,
+    depth: usize,
 }
 
 fn unsupported<T>(what: &str) -> Result<T, String> {
@@ -140,7 +143,12 @@ impl Parser {
                 }
                 self.groups += 1;
                 let idx = self.groups;
+                if self.depth >= MAX_DEPTH {
+                    return Err(format!("regex: groups nested deeper than {MAX_DEPTH}"));
+                }
+                self.depth += 1;
                 let inner = self.alt()?;
+                self.depth -= 1;
                 if self.peek() != Some(')') {
                     return Err("regex: missing ')'".into());
                 }
@@ -287,7 +295,7 @@ pub struct Regex {
 
 impl Regex {
     pub fn new(pat: &str) -> Result<Regex, String> {
-        let mut p = Parser { c: pat.chars().collect(), i: 0, groups: 0 };
+        let mut p = Parser { c: pat.chars().collect(), i: 0, groups: 0, depth: 0 };
         let ast = p.alt()?;
         if p.i < p.c.len() {
             return Err("regex: unmatched ')'".into());
@@ -316,6 +324,8 @@ impl Regex {
         }
         let mut saves = vec![None; 2 * (self.groups + 1)];
         let mut stack = vec![Frame::Try(0, start)];
+        // A (pc,pos) seen before already explored every continuation (or is an empty loop): prune it.
+        let mut seen = std::collections::HashSet::new();
         while let Some(f) = stack.pop() {
             let (mut pc, mut pos) = match f {
                 Frame::Restore(slot, old) => {
@@ -344,6 +354,9 @@ impl Regex {
                     Ins::End if pos == t.len() => pc += 1,
                     Ins::Jmp(x) => pc = *x,
                     Ins::Split(a, b) => {
+                        if !seen.insert((pc, pos)) {
+                            break;
+                        }
                         stack.push(Frame::Try(*b, pos));
                         pc = *a;
                     }
@@ -431,6 +444,9 @@ pub fn call(name: &str, a: &[Value]) -> Result<Value, String> {
                 } else {
                     pos = e;
                 }
+                if out.len() > MAX_OUT {
+                    return Err(format!("regex replace: output larger than {MAX_OUT} bytes"));
+                }
             }
             if pos <= t.len() {
                 out.extend(&t[pos..]);
@@ -452,6 +468,26 @@ mod tests {
     }
     fn m(text: &str, pat: &str) -> bool {
         r("match", &[text, pat]).unwrap() == "1"
+    }
+
+    #[test]
+    fn deep_parens_rejected_not_overflow() {
+        let e = r("match", &["x", &"(".repeat(100_000)]).unwrap_err();
+        assert!(e.contains("nested deeper"), "{e}");
+    }
+
+    #[test]
+    fn empty_loop_matches() {
+        assert!(m("b", "(a*)*b"));
+        assert!(m("aab", "(a*)*b"));
+        assert!(!m("c", "(a*)*b"));
+    }
+
+    #[test]
+    fn replace_output_capped() {
+        let big = "x".repeat(1 << 20);
+        let e = r("replace", &[&big, "x", &"y".repeat(100)]).unwrap_err();
+        assert!(e.contains("output larger"), "{e}");
     }
 
     #[test]
@@ -499,8 +535,8 @@ mod tests {
     #[test]
     fn catastrophic_backtracking_hits_the_budget() {
         let text = format!("{}!", "a".repeat(40));
-        let e = r("match", &[&text, "^(a+)+$"]).unwrap_err();
-        assert!(e.contains("regex too complex"), "{e}");
+        // (pc,pos) memoization makes this linear: a correct "no match", not a budget error.
+        assert!(!m(&text, "^(a+)+$"));
         let e = r("match", &["x", "((((a{1000}){1000}){1000}))"]).unwrap_err();
         assert!(e.contains("too complex"), "{e}");
     }

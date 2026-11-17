@@ -5,6 +5,14 @@ use crate::{put_str16, FormatError, Reader};
 pub const CACHE_NONE: u8 = 0;
 pub const CACHE_TOKEN: u8 = 1;
 
+/// Shared server-URL rule (setup-server and the build server): http(s)://, printable ASCII,
+/// no `"` or `\`, at most 2048 bytes.
+pub fn url_ok(url: &str) -> bool {
+    (url.starts_with("http://") || url.starts_with("https://"))
+        && url.len() <= 2048
+        && url.bytes().all(|b| (0x21..0x7f).contains(&b) && b != b'"' && b != b'\\')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub version: u8,

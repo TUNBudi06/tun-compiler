@@ -35,6 +35,9 @@ impl BuildRequest {
         for _ in 0..count {
             let arch = Arch::try_from(r.u8("target arch")?)?;
             let platform = Platform::try_from(r.u8("target platform")?)?;
+            if targets.contains(&Target { arch, platform }) {
+                return Err(FormatError::Invalid { what: "build_request", detail: "duplicate target".into() });
+            }
             targets.push(Target { arch, platform });
         }
         let options = r.u16("options")?;
@@ -110,6 +113,16 @@ mod tests {
         bad.extend_from_slice(&smuggled);
         bad.extend_from_slice(&[0, 0, 0]);
         assert!(BuildRequest::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_targets() {
+        let mut b = sample();
+        b.targets.push(b.targets[0]);
+        let mut o = vec![];
+        b.serialize(&mut o).unwrap();
+        let e = BuildRequest::parse(&o).unwrap_err().to_string();
+        assert!(e.contains("duplicate target"), "{e}");
     }
 
     #[test]

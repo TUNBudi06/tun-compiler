@@ -14,3 +14,4 @@ path = "src/main.rs"
 [dependencies]
 tunpak-format = { path = "../crates/tunpak-format" }
 tunpak-crypto = { path = "../crates/tunpak-crypto" }
+libc = "0.2"

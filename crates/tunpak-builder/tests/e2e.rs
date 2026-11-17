@@ -41,6 +41,23 @@ fn run_hello() {
 }
 
 #[test]
+fn foreign_arch_lib_with_lfnt_sidecar_packs() {
+    let d = hello_module("foreign", "X");
+    let mut elf = vec![0u8; 64];
+    elf[..4].copy_from_slice(b"\x7fELF");
+    let foreign: u16 = if std::env::consts::ARCH == "aarch64" { 0x3E } else { 0xB7 };
+    elf[18..20].copy_from_slice(&foreign.to_le_bytes());
+    fs::create_dir_all(d.join("lib")).unwrap();
+    fs::write(d.join("lib/x.so"), elf).unwrap();
+    fs::write(d.join("lib/x.lfnt"), b"LFNT\0\0").unwrap();
+    let pak = pack_module(&d, &PackOptions { dev: true, ..Default::default() }).unwrap();
+    let (h, _) = PakHeader::parse(&pak).unwrap();
+    let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
+    let paths: Vec<_> = dict.entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.contains(&"lib/x.so") && !paths.contains(&"lib/x.lfnt"), "{paths:?}");
+}
+
+#[test]
 fn inspect_output() {
     let d = hello_module("inspect", "X");
     let pak = pack_module(&d, &PackOptions::default()).unwrap();
@@ -175,6 +192,19 @@ mod v1 {
     }
 
     // ---- golden outputs ------------------------------------------------------------
+
+    #[test]
+    fn assign_undeclared_is_compile_error() {
+        let e = compile_err("@q = 1; print @q;");
+        assert!(e.to_string().contains("undeclared @q"), "{e}");
+        golden("let @q = 1; @q = 2; print @q;", "2\n");
+    }
+
+    #[test]
+    fn exit_without_message_prints_nothing() {
+        let r = run("exit 5;");
+        assert_eq!((r.out.as_str(), r.err.as_str(), r.code), ("", "", 5));
+    }
 
     #[test]
     fn golden_let_arith() {
@@ -594,6 +624,16 @@ print "after";"#,
         golden_src(&src.replace("let @v = r(0);", "try { let @v = r(0); } catch { print \"caught\"; }"), "caught\n", 0);
     }
     #[test]
+    fn empty_fn_does_not_alias_next_fn() {
+        golden_src("fn nothing() { }\nfn env() { return \"OOPS\"; }\nstart { let @r = nothing(); let @t = typeof(@r); print @t; print env(); }\n", "null\nOOPS\n", 0);
+    }
+    #[test]
+    fn too_many_params_is_compile_error() {
+        let ps: Vec<String> = (0..300).map(|i| format!("@p{i}")).collect();
+        let src = format!("fn f({}) {{ }}\nstart {{ }}\n", ps.join(", "));
+        assert!(compile_tzst(&src, Width::W4).is_err());
+    }
+    #[test]
     fn edge_fn_no_return_is_null() {
         golden_src("fn f() { let @a = 1; }\nstart { let @r = f(); let @t = typeof(@r); print @t; }\n", "null\n", 0);
     }
@@ -734,7 +774,7 @@ print "after";"#,
         assert_eq!((r.out.as_str(), r.code), ("hello\nsq 1 = 1\nsq 2 = 4\nsq 3 = 9\n", 0), "{r:?}");
         // inspect: fn table + disassembly
         let s = inspect(&pak).unwrap();
-        assert!(s.contains("fn 0 square argc 1"), "{s}");
+        assert!(s.contains("fn 0 \"square\" argc 1"), "{s}");
         assert!(s.contains("PRINT"), "{s}");
         fs::remove_dir_all(d).unwrap();
     }

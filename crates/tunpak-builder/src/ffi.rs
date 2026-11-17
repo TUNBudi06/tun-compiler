@@ -48,6 +48,8 @@ impl Handle {
 /// dlopen `path`, check that all four ABI symbols resolve, read the ABI version and LFNT bytes,
 /// then dlclose. The `.so`'s constructors run (it is the distributor's own file).
 pub fn read_lib(path: &Path) -> Result<RawLib, String> {
+    // a bare name would make dlopen search system library paths
+    let path = &std::path::absolute(path).map_err(|e| e.to_string())?;
     let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| "path contains NUL".to_string())?;
     // SAFETY: `c` is a valid C string; RTLD_NOW resolves everything now so failures surface here.
     let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW) };
