@@ -158,9 +158,54 @@ opcodes! {
     // are ADDED in free space next to ON_EXIT (2 bytes; no existing opcode changes meaning).
     Try = 0x00B2, "TRY";
     EndTry = 0x00B3, "END_TRY";
+    // superinstructions (min_exec_ver 2): fused forms of push/push/OP/STORE and push/push/CMP/JZ
+    Add3 = 0x00D0, "ADD3";
+    Sub3 = 0x00D1, "SUB3";
+    Mul3 = 0x00D2, "MUL3";
+    Div3 = 0x00D3, "DIV3";
+    Mod3 = 0x00D4, "MOD3";
+    And3 = 0x00D5, "AND3";
+    Or3 = 0x00D6, "OR3";
+    Xor3 = 0x00D7, "XOR3";
+    Shl3 = 0x00D8, "SHL3";
+    Shr3 = 0x00D9, "SHR3";
+    JfEq = 0x00DA, "JFEQ";
+    JfNe = 0x00DB, "JFNE";
+    JfLt = 0x00DC, "JFLT";
+    JfLe = 0x00DD, "JFLE";
+    JfGt = 0x00DE, "JFGT";
+    JfGe = 0x00DF, "JFGE";
 }
 
+/// Executor version that introduced the superinstructions 0x00D0..=0x00DF (spec/01 `min_exec_ver`).
+pub const EXEC_VER_SUPER: u8 = 2;
+
 impl Opcode {
+    /// Lowest executor version that knows this opcode (dict `min_exec_ver`).
+    pub fn min_exec_ver(self) -> u8 {
+        if (0x00D0..=0x00DF).contains(&(self as u16)) { EXEC_VER_SUPER } else { 1 }
+    }
+    /// For `OP3`: the plain binary opcode it fuses. For `JF<cc>`: the compare opcode.
+    pub fn fused_base(self) -> Option<Opcode> {
+        use Opcode as O;
+        Some(match self {
+            O::Add3 => O::Add, O::Sub3 => O::Sub, O::Mul3 => O::Mul, O::Div3 => O::Div, O::Mod3 => O::Mod,
+            O::And3 => O::And, O::Or3 => O::Or, O::Xor3 => O::Xor, O::Shl3 => O::Shl, O::Shr3 => O::Shr,
+            O::JfEq => O::Eq, O::JfNe => O::Ne, O::JfLt => O::Lt, O::JfLe => O::Le, O::JfGt => O::Gt, O::JfGe => O::Ge,
+            _ => return None,
+        })
+    }
+    /// Inverse of [`fused_base`](Self::fused_base): the 3-address form of a binary op / the
+    /// compare-and-branch form of a comparison.
+    pub fn fused(self) -> Option<Opcode> {
+        use Opcode as O;
+        Some(match self {
+            O::Add => O::Add3, O::Sub => O::Sub3, O::Mul => O::Mul3, O::Div => O::Div3, O::Mod => O::Mod3,
+            O::And => O::And3, O::Or => O::Or3, O::Xor => O::Xor3, O::Shl => O::Shl3, O::Shr => O::Shr3,
+            O::Eq => O::JfEq, O::Ne => O::JfNe, O::Lt => O::JfLt, O::Le => O::JfLe, O::Gt => O::JfGt, O::Ge => O::JfGe,
+            _ => return None,
+        })
+    }
     /// Emit as 2 bytes, big-endian.
     pub fn write(self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self as u16).to_be_bytes());
@@ -246,6 +291,19 @@ mod tests {
         let mut o = vec![];
         Opcode::Start.write(&mut o);
         assert_eq!(o, [0x00, 0x01]);
+    }
+
+    #[test]
+    fn fused_table() {
+        for &op in Opcode::ALL {
+            if let Some(b) = op.fused_base() {
+                assert_eq!(b.fused(), Some(op));
+                assert_eq!(op.min_exec_ver(), EXEC_VER_SUPER);
+            } else {
+                assert_eq!(op.min_exec_ver(), 1, "{}", op.mnemonic());
+            }
+        }
+        assert_eq!(Opcode::JfGe as u16, 0x00DF);
     }
 
     #[test]

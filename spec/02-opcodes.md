@@ -164,6 +164,42 @@ Operand notation:
 0x00C2  UNPACK     <n:1B>
 ```
 
+## Superinstructions (min_exec_ver 2)
+
+Fused forms the .tzst compiler emits by default (an API switch turns selection off; the spec/07
+examples show that unoptimized form). Each is defined as EXACTLY the plain sequence it replaces,
+so results, errors and error text are identical. Both operands are a full `<src>`
+(`00 NN` var, `01 id` builtin, `80|i` / `FE varint` const, `FF` stack). With `FF` the value was
+already pushed by earlier code and is popped (b first, then a); var/const operands are read when
+the instruction executes.
+
+```
+0x00D0  ADD3  @dst <a> <b>      = push a; push b; ADD; STORE @dst
+0x00D1  SUB3  @dst <a> <b>      = ... SUB
+0x00D2  MUL3  @dst <a> <b>      = ... MUL
+0x00D3  DIV3  @dst <a> <b>      = ... DIV   (div by zero: same error)
+0x00D4  MOD3  @dst <a> <b>      = ... MOD
+0x00D5  AND3  @dst <a> <b>      = ... AND
+0x00D6  OR3   @dst <a> <b>      = ... OR
+0x00D7  XOR3  @dst <a> <b>      = ... XOR
+0x00D8  SHL3  @dst <a> <b>      = ... SHL
+0x00D9  SHR3  @dst <a> <b>      = ... SHR
+0x00DA  JFEQ  <a> <b> <addr:4B> = push a; push b; EQ; JZ addr
+0x00DB  JFNE  <a> <b> <addr:4B> = ... NE; JZ addr
+0x00DC  JFLT  <a> <b> <addr:4B> = ... LT; JZ addr
+0x00DD  JFLE  <a> <b> <addr:4B> = ... LE; JZ addr
+0x00DE  JFGT  <a> <b> <addr:4B> = ... GT; JZ addr
+0x00DF  JFGE  <a> <b> <addr:4B> = ... GE; JZ addr
+```
+
+`JF<cc>` jumps when the comparison result is FALSE; it is NOT "jump if the negated comparison"
+(`a < b` false is not `a >= b` for mixed types / errors). The compiler uses it for `if`/`elif`
+conditions that are a bare comparison (replacing JZ) and for `while` conditions (replacing WHILE).
+WHILE == JZ at runtime; the only difference is loop-region detection (BREAK/CONTINUE), so a
+`JF<cc> a b exit` whose `exit` is immediately preceded by `JMP head` with head <= its own offset
+is treated as the loop head exactly like `WHILE exit` (see "Loop regions" in operands.rs). Any
+other JF<cc> is a plain `if`. main.tun never uses these.
+
 ## File discovery (permission-gated)
 
 ```
@@ -203,6 +239,7 @@ Operand notation:
 0x0090–0x0098  loops
 0x00A0–0x00B1  function/lib, object, trim, padding, hex_range, cleanup
 0x00C0–0x00C2  tuple
+0x00D0–0x00DF  superinstructions (exec ver 2)
 ```
 
 ## Which layer uses what

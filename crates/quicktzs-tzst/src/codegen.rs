@@ -28,6 +28,8 @@ enum Dest<'a> {
 }
 
 struct Gen {
+    /// select superinstructions (ADD3.., JF<cc>); off = plain stack form (spec/07 bytes)
+    opt: bool,
     width: Width,
     consts: Vec<Const>,
     code: Vec<u8>,
@@ -42,8 +44,9 @@ struct Gen {
     ret_jumps: Vec<usize>,
 }
 
-pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile, Vec<Perm>)> {
+pub fn generate(p: &Program, width: Width, tables: &[LibTable], opt: bool) -> Res<(TzstFile, Vec<Perm>)> {
     let mut g = Gen {
+        opt,
         width,
         consts: vec![],
         code: vec![],
@@ -629,12 +632,32 @@ impl Gen {
                 let v = self.slot(&d)?;
                 self.lib_call_pushed(e, v)
             }
+            EK::Bin(op, a, b) if self.opt && op3(*op).is_some() => {
+                // operands first (a before b), dest slot after: `let @x = @x + 1` with @x unset must still fail
+                let (sa, sb) = (self.src(a)?, self.src(b)?);
+                let v = self.slot(&d)?;
+                self.ins(op3(*op).unwrap_or(O::Add3), &[Arg::Var(v), Arg::Src(sa), Arg::Src(sb)])
+            }
             _ => {
                 self.push(e)?;
                 let v = self.slot(&d)?;
                 self.ins(O::Store, &[Arg::Var(v)])
             }
         }
+    }
+
+    /// Condition of `if` / `while`: jumps to the (patched later) target when FALSE. Returns the patch
+    /// site. `fallback` is JZ / WHILE. A plain comparison fuses to JF<cc> (same compare, same errors).
+    fn cond(&mut self, c: &Expr, fallback: O) -> Res<usize> {
+        if let (true, EK::Bin(op, a, b)) = (self.opt, &c.k) {
+            if let Some(o) = jf(*op) {
+                self.pos = c.pos;
+                let (sa, sb) = (self.src(a)?, self.src(b)?);
+                return self.jump(o, &[Arg::Src(sa), Arg::Src(sb)]);
+            }
+        }
+        self.push(c)?;
+        self.jump(fallback, &[])
     }
 
     // ---------------------------------------------------------------- statements
@@ -763,8 +786,7 @@ impl Gen {
                 let mut ends = vec![];
                 let n = arms.len();
                 for (i, (c, body)) in arms.iter().enumerate() {
-                    self.push(c)?;
-                    let next = self.jump(O::Jz, &[])?;
+                    let next = self.cond(c, O::Jz)?;
                     self.block(body)?;
                     if i + 1 < n || els.is_some() {
                         ends.push(self.jump(O::Jmp, &[])?);
@@ -835,8 +857,7 @@ impl Gen {
             }
             SK::While(c, body) => {
                 let head = self.here();
-                self.push(c)?;
-                let exit = self.jump(O::While, &[])?;
+                let exit = self.cond(c, O::While)?;
                 self.loops.push(self.try_depth);
                 self.block(body)?;
                 self.loops.pop();
@@ -907,4 +928,21 @@ impl Gen {
         }
         self.ins(O::Print, &[Arg::Parts(parts)])
     }
+}
+
+/// 3-address form of a plain binary operator (`@d = a OP b`).
+fn op3(b: Bin) -> Option<O> {
+    Some(match b {
+        Bin::Add => O::Add3, Bin::Sub => O::Sub3, Bin::Mul => O::Mul3, Bin::Div => O::Div3, Bin::Mod => O::Mod3,
+        Bin::BitAnd => O::And3, Bin::BitOr => O::Or3, Bin::Xor => O::Xor3, Bin::Shl => O::Shl3, Bin::Shr => O::Shr3,
+        _ => return None,
+    })
+}
+
+/// Compare-and-branch-if-false form of a comparison operator.
+fn jf(b: Bin) -> Option<O> {
+    Some(match b {
+        Bin::Eq => O::JfEq, Bin::Ne => O::JfNe, Bin::Lt => O::JfLt, Bin::Le => O::JfLe, Bin::Gt => O::JfGt, Bin::Ge => O::JfGe,
+        _ => return None,
+    })
 }

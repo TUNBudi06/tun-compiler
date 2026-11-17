@@ -366,8 +366,13 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
         outs[i] = Some(out);
     }
     let mut compiled_scripts: Vec<Option<Vec<u8>>> = vec![None; files.len()];
+    // an older executor must say "update executor", not "unknown opcode" (superinstructions need 2)
+    let mut min_exec_ver = 1u8;
     for (i, o) in outs.into_iter().enumerate() {
         let Some(o) = o else { continue };
+        if let Ok(insns) = quicktzs_format::operands::decode_all(&o.file.tun.code, opts.width) {
+            min_exec_ver = insns.iter().map(|i| i.op.min_exec_ver()).fold(min_exec_ver, u8::max);
+        }
         for p in o.perms {
             if !table.contains(&p) {
                 table.push(p);
@@ -428,7 +433,7 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
             version: DICT_VERSION,
             app_id,
             pak_version: opts.pak_version,
-            min_exec_ver: 1,
+            min_exec_ver,
             key_mode,
             build_time,
             author_id,

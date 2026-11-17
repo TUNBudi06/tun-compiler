@@ -18,8 +18,10 @@ use quicktzs_format::tun::TunFile;
 use quicktzs_format::types::{Arch, EntryType, KeyMode, Platform, GFLAG_DEBUG, GFLAG_REQUIRE_ONLINE};
 use quicktzs_format::tzst::TzstFile;
 
-/// Highest format/executor generation this build understands.
-pub const EXECUTOR_VERSION: u8 = 1;
+/// Executor generation (dict `min_exec_ver`): 2 = superinstructions 0x00D0..=0x00DF.
+pub const EXECUTOR_VERSION: u8 = 2;
+/// Highest on-disk struct version (pak header / dict / .tun header) this build parses.
+const FORMAT_VERSION: u8 = 1;
 
 pub struct Pak<'a> {
     signed: &'a [u8],
@@ -65,13 +67,13 @@ impl<'a> Pak<'a> {
                 ob!(": update executor")
             )));
         }
-        if hdr.version > EXECUTOR_VERSION || h.version > EXECUTOR_VERSION {
+        if hdr.version > FORMAT_VERSION || h.version > FORMAT_VERSION {
             return Err(bad(format!(
                 "{}{}{}{}{}",
                 ob!("pak format version "),
                 hdr.version.max(h.version),
                 ob!(" is newer than this executor supports ("),
-                EXECUTOR_VERSION,
+                FORMAT_VERSION,
                 ob!("): update executor")
             )));
         }
@@ -137,7 +139,7 @@ impl<'a> Pak<'a> {
         let e = &self.dict.entries[self.main_idx];
         let data = self.data(e)?;
         let (tun, _) = TunFile::parse(&data).map_err(|err| bad(format!("bad main.tun: {err}")))?;
-        if tun.header.version > EXECUTOR_VERSION {
+        if tun.header.version > FORMAT_VERSION {
             return Err(bad(ob!("main.tun version is newer than this executor supports: update executor")));
         }
         if tun.header.reserved != 0 {
