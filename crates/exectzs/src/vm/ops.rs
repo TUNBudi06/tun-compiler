@@ -193,7 +193,7 @@ pub fn find_bytes(hay: &[u8], pat: &[u8]) -> i64 {
     if pat.is_empty() {
         return 0;
     }
-    hay.windows(pat.len()).position(|w| w == pat).map_or(-1, |i| i as i64)
+    memchr::memmem::find(hay, pat).map_or(-1, |i| i as i64)
 }
 
 /// `*` and `?` wildcards.

@@ -835,3 +835,139 @@ fn lwrite_still_requires_existing_file_and_creates_no_dirs() {
     assert_eq!(r.code(), 1, "{}", r.err);
     assert!(entries(&d).is_empty());
 }
+
+// ---------------- read-handle cache ----------------
+
+fn path_lit(s: &str) -> L {
+    S(Box::leak(s.to_string().into_boxed_str()))
+}
+
+/// `READU32 @dst <- file(@pv) at off; print @dst`
+fn rd32(a: &mut Asm, dst: u8, pv: u8, off: i64) {
+    let k = a.k_i(off);
+    a.op(O::ReadU32, &[va(dst), sv(pv), sk(k)]).print_v(dst);
+}
+
+fn le32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+}
+
+#[test]
+fn cache_read_after_write_and_lwrite_sees_new_content() {
+    let d = tmpdir("rc_write");
+    std::fs::write(d.join("f.bin"), b"AAAAAAAA").unwrap();
+    let path = p(&d, "f.bin");
+    let ds = d.to_string_lossy().into_owned();
+    let mut a = Asm::new();
+    a.need(READ_DIR, &ds).need(WRITE_DIR, &ds);
+    a.let_(1, path_lit(&path));
+    a.buf(0, "BBBBBBBB");
+    a.buf(2, "CC");
+    rd32(&mut a, 3, 1, 0);
+    let k0 = a.k_i(0);
+    a.op(O::Write, &[sv(0), sv(1), sk(k0)]);
+    rd32(&mut a, 3, 1, 0);
+    let (k4, k2) = (a.k_i(4), a.k_i(2));
+    a.op(O::WriteSlot, &[sv(2), sv(1), sk(k4), sk(k2), u(0), u(0)]);
+    rd32(&mut a, 3, 1, 4);
+    a.halt();
+    let r = run(&a.build());
+    // 0x41414141, 0x42424242, then lwrite "CC" over bytes 4..6 -> 43 43 42 42
+    assert_eq!((r.out.as_str(), r.code()), ("1094795585\n1111638594\n1111638851\n", 0), "{}", r.err);
+}
+
+#[test]
+fn cache_ten_files_round_robin_evicts_correctly() {
+    let d = tmpdir("rc_rr");
+    let mut a = Asm::new();
+    a.need(READ_DIR, &d.to_string_lossy());
+    let mut want = String::new();
+    for i in 0..10u32 {
+        std::fs::write(d.join(format!("f{i}.bin")), (i * 1000 + 7).to_le_bytes()).unwrap();
+    }
+    for round in 0..3 {
+        for i in 0..10u32 {
+            let pv = 10 + i as u8;
+            if round == 0 {
+                a.let_(pv, path_lit(&p(&d, &format!("f{i}.bin"))));
+            }
+            rd32(&mut a, 1, pv, 0);
+            want += &format!("{}\n", i * 1000 + 7);
+        }
+    }
+    a.halt();
+    let r = run(&a.build());
+    assert_eq!((r.out.as_str(), r.code()), (want.as_str(), 0), "{}", r.err);
+}
+
+#[test]
+fn cache_window_edge_big_read_and_eof() {
+    let d = tmpdir("rc_win");
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(7) % 251) as u8).collect();
+    std::fs::write(d.join("f.bin"), &data).unwrap();
+    let path = p(&d, "f.bin");
+    let mut a = Asm::new();
+    a.need(READ_DIR, &d.to_string_lossy());
+    a.let_(1, path_lit(&path));
+    let offs = [0usize, 65534, 65532, 131070, 10, 199_996];
+    for o in offs {
+        rd32(&mut a, 3, 1, o as i64);
+    }
+    rd32(&mut a, 3, 1, 65534);
+    a.try_("t", |a| rd32(a, 3, 1, 199_997));
+    a.halt();
+    let r = run(&a.build());
+    let mut want: String = offs.iter().map(|&o| format!("{}\n", le32(&data, o))).collect();
+    want += &format!("{}\ncaught\n", le32(&data, 65534));
+    assert_eq!((r.out.as_str(), r.code()), (want.as_str(), 0), "{}", r.err);
+    // same error text as an uncached read past the end
+    let mut a = Asm::new();
+    a.need(READ_DIR, &d.to_string_lossy());
+    a.let_(1, path_lit(&path));
+    rd32(&mut a, 3, 1, 199_997);
+    a.halt();
+    let r = run(&a.build());
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("read out of bounds"), "{}", r.err);
+}
+
+#[test]
+fn cache_whole_file_read_larger_than_window() {
+    let d = tmpdir("rc_big");
+    let mut data = vec![b'.'; 150_000];
+    data[140_000..140_004].copy_from_slice(b"NEED");
+    std::fs::write(d.join("f.bin"), &data).unwrap();
+    let r = fs_prog(&[(READ_DIR, d.to_string_lossy().into_owned())], &p(&d, "f.bin"), |a| {
+        let k = a.k_s("NEED");
+        a.op(O::Find, &[va(2), sv(1), sk(k)]).print_v(2);
+        rd32(a, 3, 1, 139_999);
+    });
+    assert_eq!((r.out.as_str(), r.code()), (format!("140000\n{}\n", le32(&data, 139_999)).as_str(), 0), "{}", r.err);
+}
+
+#[test]
+fn cache_denied_path_still_denied_when_another_file_cached() {
+    let root = tmpdir("rc_deny_root");
+    let other = tmpdir("rc_deny_other");
+    std::fs::write(root.join("a.bin"), [1, 0, 0, 0]).unwrap();
+    std::fs::write(other.join("s.bin"), [9, 0, 0, 0]).unwrap();
+    let mut a = Asm::new();
+    a.need(READ_DIR, &root.to_string_lossy());
+    a.let_(1, path_lit(&p(&root, "a.bin")));
+    a.let_(2, path_lit(&p(&other, "s.bin")));
+    rd32(&mut a, 3, 1, 0);
+    rd32(&mut a, 3, 1, 0);
+    rd32(&mut a, 3, 2, 0);
+    a.halt();
+    denied(&run(&a.build()));
+}
+
+#[test]
+fn findloc_len1_pattern_longer_than_file_from_beyond_eof() {
+    let (d, _, path) = lw_setup("fl_edge", b"hello");
+    let need = [(READ_DIR, d.to_string_lossy().into_owned())];
+    for (pat, from, want) in [("o", 0, "4\n"), ("l", 3, "3\n"), ("hello!", 0, "-1\n"), ("h", 5, "-1\n"), ("h", 1000, "-1\n")] {
+        let r = fl(&need, &path, pat, from);
+        assert_eq!((r.out.as_str(), r.code()), (want, 0), "{pat} {from}: {}", r.err);
+    }
+}

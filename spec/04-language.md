@@ -316,6 +316,12 @@ untouched. At most 64 paths may be staged at once. While a path is staged, `writ
 fail with `append in progress on '<path>'`; `read`/`fsize`/`findloc` keep seeing the OLD file until the
 commit.
 
+Read cache (no keyword, no format change): `read`/`read_*`/`readstr` keep up to 8 files open per run
+(LRU) with a 64 KiB read window each, so repeated small reads of one path cost no syscall and no
+repeated NEED check (the first use of a path is always checked). A file is re-read fresh after any
+`write`/`lwrite`/`append` commit by the script, after `RUN`, and at the start of every new run. A file
+changed by ANOTHER process while the script runs may be read stale. `fsize` always stats the file.
+
 ## Soft keywords
 
 Built-in names (the prefix ops `fsize`, `findloc`, `read`, `split`, ... and the statements `write`,

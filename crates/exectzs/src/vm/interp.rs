@@ -56,6 +56,8 @@ pub struct Env {
     pub perms: Perms,
     /// staged `append` files of the whole program (moves with the Env into RUN'd scripts)
     pub appends: fsio::Appends,
+    /// open read handles + windows (see `fsio::ReadCache`)
+    pub reads: fsio::ReadCache,
     /// Force `$TERM_COLOR` (None = detect).
     pub term_color: Option<bool>,
 }
@@ -172,6 +174,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             last_exit: 0,
             perms: Perms::default(),
             appends: Default::default(),
+            reads: Default::default(),
             term_color: opts.term_color,
         };
         let l = Launcher { loaded: vec![], perm_ids: vec![] };
@@ -208,7 +211,10 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         match self.run_steps() {
             // staged appends of every script this launcher RAN are committed once, at the end
-            Ok(c) => self.env.appends.commit().map(|()| c).map_err(fault_to_exec),
+            Ok(c) => {
+                self.env.reads.clear();
+                self.env.appends.commit().map(|()| c).map_err(fault_to_exec)
+            }
             Err(e) => Err(fault_to_exec(e)),
         }
     }
@@ -234,6 +240,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             self.env.appends = Default::default();
         }
         if self.top && ended_ok {
+            self.env.reads.clear();
             if let Err(f) = self.env.appends.commit() {
                 let _ = writeln!(self.io.err, "error: {}", match f { Fault::Rt(m) => m, Fault::Fatal(e) => e.msg });
                 return if code == 0 { 1 } else { code };
@@ -497,13 +504,12 @@ impl<'a, 'io> Vm<'a, 'io> {
                 if off < 0 || len < 0 {
                     return Err(OOB.into());
                 }
-                let path = self.env.perms.check(p, Access::Read)?;
-                let flen = fsio::file_len(&path, p)?;
+                let flen = self.env.reads.open(&self.env.perms, p)?;
                 if (off as u64).checked_add(len as u64).map_or(true, |e| e > flen) {
                     return Err(OOB.into());
                 }
                 self.alloc(len as u64)?;
-                Ok(fsio::read_range(&path, p, off as u64, len as usize)?)
+                Ok(self.env.reads.read(off as u64, len as usize)?)
             }
             o => Err(format!("cannot read from {}", o.type_name()).into()),
         }
@@ -514,10 +520,9 @@ impl<'a, 'io> Vm<'a, 'io> {
         match src {
             Value::Buf(b) => Ok(b.to_vec()),
             Value::Str(p) => {
-                let path = self.env.perms.check(p, Access::Read)?;
-                let n = fsio::file_len(&path, p)?;
+                let n = self.env.reads.open(&self.env.perms, p)?;
                 self.alloc(n)?;
-                Ok(fsio::read_range(&path, p, 0, n as usize)?)
+                Ok(self.env.reads.read(0, n as usize)?)
             }
             o => Err(format!("cannot read from {}", o.type_name()).into()),
         }
@@ -1295,6 +1300,7 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         let path = self.env.perms.check(dst, Access::Write)?;
         self.not_staged(&path, dst)?;
+        self.env.reads.clear();
         fsio::write_atomic(&path, dst, data, off as u64, self.deadline, self.mem_limit)
     }
 
@@ -1339,6 +1345,7 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         let path = self.env.perms.check(dst, Access::Write)?;
         self.not_staged(&path, dst)?;
+        self.env.reads.clear();
         let mut warn = None;
         fsio::write_slot(&path, dst, data, off as u64, slot as u64, mode == 1, fill, self.deadline, &mut warn)?;
         if let Some(w) = warn {
@@ -1550,6 +1557,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             let started = Instant::now();
             let code = nested.run_script();
             self.env = nested.env;
+            self.env.reads.clear(); // the RUN'd script may have written files
             // the script had its own budget: its wall time does not count against the launcher
             self.deadline += started.elapsed();
             if let Some(t) = self.env.perms.time.filter(|t| *t > self.limits.timeout) {
@@ -1560,7 +1568,9 @@ impl<'a, 'io> Vm<'a, 'io> {
             return Ok(if code != 0 { Some(code) } else { None });
         }
         let vars = &self.cur.vars;
-        let st = run_exec::run(svc, r, &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io, self.deadline)?;
+        let st = run_exec::run(svc, r, &|i| vars.get(i).map(stringify).map_err(|m| ExecError::new(EXIT_ERROR, m)), &mut *self.io, self.deadline);
+        self.env.reads.clear(); // an external program may have changed files
+        let st = st?;
         self.env.last_exit = st;
         Ok(None)
     }

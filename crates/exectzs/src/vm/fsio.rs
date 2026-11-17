@@ -4,7 +4,7 @@ use super::ops::OOB;
 use super::{Fault, R};
 use crate::{ExecError, EXIT_PERM_DENIED};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -103,17 +103,93 @@ pub fn file_len(p: &Path, shown: &str) -> Result<u64, String> {
     std::fs::metadata(p).map(|m| m.len()).map_err(|e| format!("cannot read '{shown}': {e}"))
 }
 
-/// Read exactly `len` bytes at `off`; past the end → `read out of bounds`.
-pub fn read_range(p: &Path, shown: &str, off: u64, len: usize) -> Result<Vec<u8>, String> {
-    let mut f = std::fs::File::open(p).map_err(|e| format!("cannot read '{shown}': {e}"))?;
-    let flen = f.metadata().map_err(|e| format!("cannot read '{shown}': {e}"))?.len();
-    if off.checked_add(len as u64).map_or(true, |e| e > flen) {
-        return Err(OOB.into());
+const WINDOW: usize = 64 * 1024;
+const MAX_HANDLES: usize = 8;
+
+struct Handle {
+    key: String,
+    file: std::fs::File,
+    len: u64,
+    win_off: u64,
+    win: Vec<u8>,
+}
+
+/// Per-run cache of open read handles (max `MAX_HANDLES`, LRU; the last entry is the most recent),
+/// keyed by the path string a script used. A hit skips canonicalize + the NEED check + open: the
+/// handle is the inode that passed the check on first use. Each handle keeps one `WINDOW`-sized
+/// read window so many small reads cost no syscall. Cleared by every write/lwrite/append commit,
+/// after `RUN`, and on drop.
+// shortcut: a file changed by ANOTHER process while this script runs may be read stale from the
+// window/handle (length is also cached); upgrade = fstat check per read if that ever matters.
+#[derive(Default)]
+pub struct ReadCache(Vec<Handle>);
+
+impl ReadCache {
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
-    f.seek(SeekFrom::Start(off)).map_err(|e| format!("cannot read '{shown}': {e}"))?;
-    let mut v = vec![0u8; len];
-    f.read_exact(&mut v).map_err(|e| format!("cannot read '{shown}': {e}"))?;
-    Ok(v)
+
+    /// Make `shown` the most recent handle (opening it after the NEED check on a miss); returns its
+    /// length. Follow with `read`.
+    pub fn open(&mut self, perms: &Perms, shown: &str) -> R<u64> {
+        if let Some(i) = self.0.iter().position(|h| h.key == shown) {
+            let h = self.0.remove(i);
+            self.0.push(h);
+        } else {
+            let path = perms.check(shown, Access::Read)?;
+            let err = |e: std::io::Error| format!("cannot read '{shown}': {e}");
+            let file = std::fs::File::open(&path).map_err(err)?;
+            let len = file.metadata().map_err(err)?.len();
+            if self.0.len() >= MAX_HANDLES {
+                self.0.remove(0);
+            }
+            self.0.push(Handle { key: shown.to_string(), file, len, win_off: 0, win: Vec::new() });
+        }
+        Ok(self.0.last().map_or(0, |h| h.len))
+    }
+
+    /// `len` bytes at `off` of the handle last returned by `open`; past the end -> `read out of bounds`.
+    pub fn read(&mut self, off: u64, len: usize) -> Result<Vec<u8>, String> {
+        let h = self.0.last_mut().ok_or("internal: no open read handle")?;
+        if off.checked_add(len as u64).map_or(true, |e| e > h.len) {
+            return Err(OOB.into());
+        }
+        let io = |e: std::io::Error| format!("cannot read '{}': {e}", h.key);
+        let fill = |f: &std::fs::File, mut at: u64, buf: &mut [u8]| -> std::io::Result<usize> {
+            let mut n = 0;
+            while n < buf.len() {
+                match f.read_at(&mut buf[n..], at) {
+                    Ok(0) => break,
+                    Ok(k) => {
+                        n += k;
+                        at += k as u64;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(n)
+        };
+        if len > WINDOW {
+            let mut v = vec![0u8; len];
+            if fill(&h.file, off, &mut v).map_err(io)? < len {
+                return Err(io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+            return Ok(v);
+        }
+        let in_win = off >= h.win_off && off + len as u64 <= h.win_off + h.win.len() as u64;
+        if !in_win {
+            h.win.resize(WINDOW, 0);
+            let n = fill(&h.file, off, &mut h.win).map_err(io)?;
+            h.win.truncate(n);
+            h.win_off = off;
+            if n < len {
+                return Err(io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+        }
+        let s = (off - h.win_off) as usize;
+        Ok(h.win[s..s + len].to_vec())
+    }
 }
 
 /// Sorted full paths of non-directory entries in `dir` whose NAME matches `pat`.
@@ -364,6 +440,7 @@ pub fn find_in_file(p: &Path, shown: &str, pat: &[u8], from: u64, deadline: Inst
     }
     f.seek(SeekFrom::Start(from)).map_err(io)?;
     let keep_max = pat.len() - 1;
+    let finder = memchr::memmem::Finder::new(pat); // built once, reused for every chunk
     let mut buf = vec![0u8; CHUNK + keep_max];
     let (mut carry, mut base) = (0usize, from); // base = absolute offset of buf[0]
     loop {
@@ -375,9 +452,8 @@ pub fn find_in_file(p: &Path, shown: &str, pat: &[u8], from: u64, deadline: Inst
             return Ok(-1);
         }
         let total = carry + n;
-        let i = super::ops::find_bytes(&buf[..total], pat);
-        if i >= 0 {
-            return Ok(base as i64 + i);
+        if let Some(i) = finder.find(&buf[..total]) {
+            return Ok(base as i64 + i as i64);
         }
         let keep = keep_max.min(total);
         buf.copy_within(total - keep..total, 0);
