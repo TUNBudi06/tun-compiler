@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-18
 
-### Faster: read cache, findloc, superinstructions. CI release builds (`PENDING`)
+### Faster: read cache, findloc, superinstructions. CI release builds (`9020b30`)
 - **Reads:** `read_u32`, `read`, etc. keep up to 8 files open with a 64 KiB read window. A read went from
   about 6 µs to 0.15 µs. The NEED check still runs the first time a path is read. Files are closed
   automatically: least recently used first when a 9th opens, all at the end of the script, and all after any
