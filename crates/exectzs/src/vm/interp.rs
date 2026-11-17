@@ -443,6 +443,20 @@ impl<'a, 'io> Vm<'a, 'io> {
             Src::Stack => self.pop(),
         }
     }
+    /// Borrow-only read of an int operand (var or const); None for anything else (incl. stack).
+    fn int_peek(&self, s: Src) -> Option<i64> {
+        match s {
+            Src::Var(i) => match self.cur.vars.get(i) {
+                Ok(Value::Int(n)) => Some(*n),
+                _ => None,
+            },
+            Src::Const(i) => match self.prog.consts.get(usize::try_from(i).ok()?) {
+                Some(Value::Int(n)) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     fn int_src(&mut self, s: Src, what: &str) -> R<i64> {
         let v = self.src(s)?;
         Ok(int_of(&v, what)?)
@@ -696,6 +710,37 @@ impl<'a, 'io> Vm<'a, 'io> {
                 let (b, a) = (self.pop()?, self.pop()?);
                 let r = ops::arith(op, a, b)?;
                 self.push_new(r)?;
+            }
+
+            // ---- superinstructions: exactly `push a; push b; OP; STORE @dst` / `...; CMP; JZ addr` ----
+            O::Add3 | O::Sub3 | O::Mul3 | O::Div3 | O::Mod3 | O::And3 | O::Or3 | O::Xor3 | O::Shl3 | O::Shr3 => {
+                let base = op.fused_base().unwrap_or(op);
+                let (sa, sb) = (a_src(insn, 1), a_src(insn, 2));
+                let r = match (self.int_peek(sa), self.int_peek(sb)) {
+                    (Some(x), Some(y)) => ops::arith(base, Value::Int(x), Value::Int(y))?,
+                    _ => {
+                        let b = self.src(sb)?;
+                        let a = self.src(sa)?;
+                        ops::arith(base, a, b)?
+                    }
+                };
+                self.weigh(shallow_size(&r) as usize);
+                self.set_new(a_var(insn, 0), r)?;
+            }
+            O::JfEq | O::JfNe | O::JfLt | O::JfLe | O::JfGt | O::JfGe => {
+                let base = op.fused_base().unwrap_or(op);
+                let (sa, sb) = (a_src(insn, 0), a_src(insn, 1));
+                let t = match (self.int_peek(sa), self.int_peek(sb)) {
+                    (Some(x), Some(y)) => ops::compare(base, &Value::Int(x), &Value::Int(y))?,
+                    _ => {
+                        let b = self.src(sb)?;
+                        let a = self.src(sa)?;
+                        ops::compare(base, &a, &b)?
+                    }
+                };
+                if !t {
+                    self.goto(a_addr(insn, 2))?;
+                }
             }
 
             // ---- control flow ----

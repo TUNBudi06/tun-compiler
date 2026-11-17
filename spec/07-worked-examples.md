@@ -3,6 +3,9 @@
 Width = 4 unless noted. Opcodes 2 bytes. Var index 1B. Const ref varint. Jump addr 4B.
 Int in const pool = varint. These are reference encodings the assembler must reproduce.
 
+Note: the examples show UNOPTIMIZED output (plain push/push/OP/STORE and JZ/WHILE). The compiler's default
+also fuses these into the spec/02 superinstructions (ADD3.., JF<cc>); tests pin these bytes with opt off.
+
 ## main.tun
 
 Text:

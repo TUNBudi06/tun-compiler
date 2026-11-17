@@ -1,5 +1,5 @@
 //! `.tzst` compiler tests: golden bytes (spec/07), structural sanity of every form, static checks.
-use crate::{compile_tzst, disassemble, CompileError, TzstOutput};
+use crate::{compile_tzst, compile_tzst_opt, disassemble, CompileError, TzstOutput};
 use quicktzs_format::dict::Perm;
 use quicktzs_format::opcodes::Opcode as O;
 use quicktzs_format::operands::{decode_all, loop_regions, Arg, Src};
@@ -7,8 +7,9 @@ use quicktzs_format::tun::Const;
 use quicktzs_format::tzst::TzstFile;
 use quicktzs_format::types::{PermKind, Width};
 
+/// Unoptimized (`opt = false`): the spec/07 plain push/push/OP/STORE form these golden tests pin.
 fn c(src: &str) -> Result<TzstOutput, CompileError> {
-    compile_tzst(src, Width::W4)
+    compile_tzst_opt(src, Width::W4, &|p| Err(format!("cannot resolve '{p}' without a module (use the builder)")), false)
 }
 fn ok(src: &str) -> TzstOutput {
     c(src).unwrap_or_else(|e| panic!("{e}\n--- source:\n{src}"))
@@ -596,4 +597,43 @@ fn soft_keyword_builtin_still_used_without_user_fn() {
     assert!(disassemble(&o.file.tun.code, &o.file.tun.consts, Width::W4).unwrap().contains("FILE_SIZE"));
     // a user fn elsewhere does not turn the unparenthesised built-in form into a call
     ok("NEED write \"/d\";\nfn append(@a, @b) { return; }\nstart { let @p = \"/d/f\"; append \"x\" -> @p; }");
+}
+
+// ---- superinstructions (default on)
+
+fn code_ops(o: &TzstOutput) -> Vec<O> {
+    decode_all(&o.file.tun.code, Width::W4).unwrap().iter().map(|i| i.op).collect()
+}
+
+#[test]
+fn opt_three_address_and_fused_branch_bytes() {
+    let o = compile_tzst("start { let @i = 0; while @i < 10 { let @i = @i + 1; } }", Width::W4).unwrap();
+    sane(&o, Width::W4);
+    // let @0 = #0 ; JFLT @0 #1 exit ; ADD3 @0 @0 #2 ; JMP head ; HALT
+    let (zero, ten, one) = (ci(&o, Const::Int(0)), ci(&o, Const::Int(10)), ci(&o, Const::Int(1)));
+    let want: Vec<u8> = [
+        &[0x00, 0x30, 0x00, zero as u8][..],
+        &[0x00, 0xDC, 0x00, 0x00, 0x80 | ten as u8, 25, 0, 0, 0],
+        &[0x00, 0xD0, 0x00, 0x00, 0x00, 0x80 | one as u8],
+        &[0x00, 0x51, 4, 0, 0, 0],
+        &[0x00, 0x03],
+    ]
+    .concat();
+    assert_eq!(o.file.tun.code, want);
+    // the same source unoptimized is the plain stack form
+    let p = c("start { let @i = 0; while @i < 10 { let @i = @i + 1; } }").unwrap();
+    let ops = code_ops(&p);
+    assert!(ops.contains(&O::While) && ops.contains(&O::Add) && !ops.contains(&O::JfLt));
+}
+
+#[test]
+fn opt_break_continue_regions_survive_fused_while() {
+    let o = ok_opt("start { let @i = 0; while @i < 9 { let @i = @i + 1; if @i == 3 { continue; } if @i > 6 { break; } print @i; } }");
+    let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
+    let r = loop_regions(&ins).unwrap();
+    assert_eq!(r.iter().filter(|r| !r.is_for).count(), 1, "only the while is a loop, the ifs are not");
+}
+
+fn ok_opt(src: &str) -> TzstOutput {
+    compile_tzst(src, Width::W4).unwrap_or_else(|e| panic!("{e}\n{src}"))
 }

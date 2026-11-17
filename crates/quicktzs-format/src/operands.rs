@@ -30,6 +30,8 @@
 //! | LAND / LOR | | pop b, pop a, push int 1/0. Short-circuit is done by the compiler: `a; DUP; JZ L; b; LAND; L:` and `a; DUP; JZ R; JMP L; R: b; LOR; L:` — JZ pops the DUP'd copy, so at L the stack holds one value whose truthiness is the result |
 //! | NEG / NOT | | pop a, push -a / ~a |
 //! | ADD SUB MUL DIV MOD AND OR XOR SHL SHR | | pop b, pop a, push a∘b. ADD also concatenates str+str and buf+buf. Div/mod by zero → runtime error. Int ops wrap (i64) |
+//! | ADD3 SUB3 MUL3 DIV3 MOD3 AND3 OR3 XOR3 SHL3 SHR3 | @dst a b | exactly `push a; push b; OP; STORE @dst` (a, b any `<src>`; `FF` pops, b first) |
+//! | JFEQ JFNE JFLT JFLE JFGT JFGE | a b addr | exactly `push a; push b; CMP; JZ addr` (jump when the comparison is FALSE; same compare fn + errors) |
 //! | JZ | addr | pop; jump if falsy |
 //! | JMP | addr | jump |
 //! | FOR_RANGE | @v a b | loop var @v from a while < b, step 1. Empty range → jump past the matching FOR_NEXT |
@@ -100,6 +102,8 @@
 //! - for-loop: from its FOR_RANGE/FOR_STEP/FOR_EACH insn to the end of its matching FOR_NEXT
 //!   (matched by nesting). CONTINUE → jump to the FOR_NEXT insn. BREAK → drop the loop state,
 //!   jump past FOR_NEXT.
+//! - while-loop (fused): a `JF<cc> a b exit` whose `exit` is preceded by a `JMP head` with
+//!   head <= its own offset is a `WHILE exit` (same region). A JF<cc> without that shape is an `if`.
 //! - while-loop: `WHILE exit` at offset w; the insn just before `exit` is `JMP head`. Region =
 //!   [head, exit). CONTINUE → head. BREAK → exit.
 //! BREAK/CONTINUE use the innermost region containing them.
@@ -185,6 +189,8 @@ pub fn operands(op: Opcode) -> &'static [Kind] {
         O::Land | O::Lor | O::Neg | O::Not => &[],
         O::Add | O::Sub | O::Mul | O::Div | O::Mod => &[],
         O::And | O::Or | O::Xor | O::Shl | O::Shr => &[],
+        O::Add3 | O::Sub3 | O::Mul3 | O::Div3 | O::Mod3 | O::And3 | O::Or3 | O::Xor3 | O::Shl3 | O::Shr3 => &[Var, Src, Src],
+        O::JfEq | O::JfNe | O::JfLt | O::JfLe | O::JfGt | O::JfGe => &[Src, Src, Addr],
         O::Jz | O::Jmp | O::ForNext | O::While | O::Case | O::OnExit | O::Try => &[Addr],
         O::Break | O::Continue | O::EndTry => &[],
         O::ForRange => &[Var, Src, Src],
@@ -382,6 +388,17 @@ pub fn loop_regions(insns: &[Insn]) -> Result<Vec<LoopRegion>, FormatError> {
                     })
                     .ok_or_else(|| bad(format!("WHILE at {}: exit {exit} is not preceded by JMP head", i.at)))?;
                 out.push(LoopRegion { start: head, end: exit, continue_to: head, break_to: exit, is_for: false });
+            }
+            Opcode::JfEq | Opcode::JfNe | Opcode::JfLt | Opcode::JfLe | Opcode::JfGt | Opcode::JfGe => {
+                let Some(Arg::Addr(exit)) = i.args.get(2) else { unreachable!() };
+                let exit = *exit as usize;
+                let back = insns[n..].iter().find(|j| j.next == exit).and_then(|j| match (j.op, j.args.first()) {
+                    (Opcode::Jmp, Some(Arg::Addr(h))) if (*h as usize) <= i.at => Some(*h as usize),
+                    _ => None,
+                });
+                if let Some(head) = back {
+                    out.push(LoopRegion { start: head, end: exit, continue_to: head, break_to: exit, is_for: false });
+                }
             }
             _ => {}
         }
