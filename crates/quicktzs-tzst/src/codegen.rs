@@ -63,6 +63,7 @@ pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile
             NeedKind::Read => (PermKind::ReadDir, 1u8),
             NeedKind::Write => (PermKind::WriteDir, 2),
             NeedKind::Mem => (PermKind::Mem, 8),
+            NeedKind::Time => (PermKind::Time, 10),
         };
         if seen.contains(&(op_kind, n.text.as_str())) {
             continue;

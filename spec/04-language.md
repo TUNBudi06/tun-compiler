@@ -80,6 +80,7 @@ executor shows the description AND the real argument values to the user before e
 NEED read "/data";
 NEED write "/data/out";
 NEED mem 512mb;
+NEED time 10m;     // raise the script timeout (s/m/h); can only raise
 
 import "std/json" as json;
 import "lib/zstd" as zstd;

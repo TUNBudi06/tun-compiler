@@ -141,6 +141,7 @@ pub enum NeedKind {
     Read,
     Write,
     Mem,
+    Time,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -387,7 +388,7 @@ impl P<'_> {
 
     fn need(&mut self, t: &Token) -> Res<Need> {
         let k = self.next()?;
-        let Tok::Ident(kind) = &k.tok else { return Err(err(&k, "expected read, write or mem after NEED")) };
+        let Tok::Ident(kind) = &k.tok else { return Err(err(&k, "expected read, write, mem or time after NEED")) };
         let (kind, text) = match kind.as_str() {
             "read" | "write" => {
                 let nk = if kind == "read" { NeedKind::Read } else { NeedKind::Write };
@@ -407,7 +408,16 @@ impl P<'_> {
                 let text: String = line.chars().skip(v.col - 1).take_while(|c| c.is_ascii_alphanumeric()).collect();
                 (NeedKind::Mem, text)
             }
-            _ => return Err(err(&k, "expected read, write or mem after NEED")),
+            "time" => {
+                let v = self.next()?;
+                if !matches!(v.tok, Tok::Dur(_)) {
+                    return Err(err(&v, "NEED time expects a duration like 10m"));
+                }
+                let line = self.src.lines().nth(v.line - 1).unwrap_or("");
+                let text: String = line.chars().skip(v.col - 1).take_while(|c| c.is_ascii_alphanumeric()).collect();
+                (NeedKind::Time, text)
+            }
+            _ => return Err(err(&k, "expected read, write, mem or time after NEED")),
         };
         self.semi()?;
         Ok(Need { kind, text, pos: (t.line, t.col) })

@@ -11,6 +11,8 @@ pub enum Tok {
     Int(u64),
     /// `512mb` -> bytes (kb/mb/gb, powers of 1024; `b` = bytes)
     Size(u64),
+    /// `10m` -> seconds (s/m/h); only valid after `NEED time`
+    Dur(u64),
     Str(String),
     /// `f"..."` raw text between the quotes (escapes untouched)
     FStr(String),
@@ -148,6 +150,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                 adv!();
             }
             let suf: String = cs[t..i].iter().collect::<String>().to_ascii_lowercase();
+            if let Some(m) = match suf.as_str() { "s" => Some(1), "m" => Some(60), "h" => Some(3600), _ => None } {
+                let v = n.checked_mul(m).ok_or_else(|| err("duration literal overflows".into()))?;
+                out.push(Token { tok: Tok::Dur(v), line: l0, col: c0 });
+                continue;
+            }
             let mul: u64 = match suf.as_str() {
                 "" => 0,
                 "b" => 1,

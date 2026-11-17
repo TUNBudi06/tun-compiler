@@ -110,6 +110,7 @@ per perm:
   +0x00  1B   kind
   kind 1=read_dir 2=write_dir 3=read_file 4=write_file 5=camera 6=mic 7=net 8=mem:
      + path_len:2 + path        (for 8=mem, "path" is the byte-count as text, e.g. "512mb")
+  kind 10=time: path_len:2 + path   ("path" is the duration as text, e.g. "10m"; raises the timeout)
   kind 9=run_exec:
      + path_len:2 + path
      + desc_len:2 + desc

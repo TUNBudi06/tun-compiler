@@ -125,3 +125,46 @@ fn loop_states_are_capped() {
     assert_eq!(r.code(), 1, "{r:?}");
     assert!(r.err.contains("too many active loops"), "{}", r.err);
 }
+
+/// Busy loop of `n` iterations, optionally preceded by `NEED time 2s`.
+fn spin(n: i64, need_time: bool) -> quicktzs_format::tzst::TzstFile {
+    let mut a = Asm::new();
+    if need_time {
+        a.need(10, "2s");
+    }
+    let (k0, kn) = (a.k_i(0), a.k_i(n));
+    a.op(O::ForRange, &[va(5), sk(k0), sk(kn)]);
+    a.label("l").op(O::Nop, &[]).op(O::ForNext, &[lbl("l")]);
+    a.print_s("done").halt();
+    a.build()
+}
+
+#[test]
+fn need_time_raises_the_timeout() {
+    let o = opts_with(200, 256 << 20);
+    let n = 6_000_000;
+    let t = Instant::now();
+    let r = run_with(&spin(n, false), &o, "");
+    let base = t.elapsed();
+    assert!(r.err.contains("timeout"), "{r:?}");
+    assert!(base < Duration::from_secs(2), "{base:?}");
+    let r = run_with(&spin(n, true), &o, "");
+    assert_eq!((r.code(), r.out.as_str()), (0, "done\n"), "{r:?}");
+}
+
+#[test]
+fn need_time_cannot_lower_the_timeout() {
+    let mut a = Asm::new();
+    a.need(10, "1s");
+    let (k0, kn) = (a.k_i(0), a.k_i(6_000_000));
+    a.op(O::ForRange, &[va(5), sk(k0), sk(kn)]);
+    a.label("l").op(O::Nop, &[]).op(O::ForNext, &[lbl("l")]);
+    a.print_s("done").halt();
+    let r = run_with(&a.build(), &opts_with(200, 256 << 20), "");
+    assert_eq!((r.code(), r.out.as_str()), (0, "done\n"), "{r:?}"); // 1s raises 200ms
+    let mut a = Asm::new();
+    a.need(10, "1s");
+    a.need(10, "1ms"); // not a valid unit
+    a.halt();
+    assert!(run(&a.build()).err.contains("bad NEED time duration"));
+}

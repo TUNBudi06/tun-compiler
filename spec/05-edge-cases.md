@@ -104,6 +104,9 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | path outside any NEED write root | exit 126, same as `write` |
 | `mode` operand not 0/1 | runtime "bad operand" error |
 | timeout / error mid-copy | temp file removed, original intact |
+| `NEED time 2s` with a lower default/RunOptions timeout | script may run past the default (timeout raised) |
+| `NEED time` below the default timeout | ignored (it only raises) |
+| `NEED time 5` / `NEED time abc` / `NEED time 10x` | compile error `NEED time expects a duration like 10m` |
 | very large file (e.g. 64MB, `NEED mem 16mb`) | succeeds: memory is O(chunk + n), file is never loaded |
 
 ## fsize / findloc / append (FILE_SIZE, FINDLOC, APPEND)
@@ -130,7 +133,7 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | `append` then timeout | target untouched, no temp left |
 | `append` then SIGINT/SIGTERM/SIGHUP or panic | temps removed, targets untouched |
 | `append` path outside any NEED write root | exit 126, same as `write` |
-| `append` total (existing + appended) over the memory limit | runtime error `out of memory`, nothing committed |
+| `append` total (existing + appended) over the memory limit | succeeds (streams to disk, not memory-limited) |
 | 65th distinct staged path | runtime error `append: too many files in flight (max 64)` |
 | `write` / `lwrite` to a path with a staged append | runtime error `append in progress on '<path>'` |
 | `read` / `fsize` / `findloc` of a path with a staged append | see the old file (until commit) |

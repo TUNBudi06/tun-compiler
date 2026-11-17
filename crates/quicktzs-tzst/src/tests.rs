@@ -255,6 +255,22 @@ fn need_perms() {
     sane(&o, Width::W4);
 }
 
+#[test]
+fn need_time_perm_and_errors() {
+    let o = ok("NEED time 10m;\nNEED time 90s;\nNEED time 2h;\nstart { halt; }");
+    assert_eq!(
+        o.perms,
+        ["10m", "90s", "2h"].map(|p| Perm::Path { kind: PermKind::Time, path: p.into() }).to_vec()
+    );
+    let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
+    assert_eq!(ins[0].args[0], Arg::U8(10));
+    assert_eq!(o.file.tun.consts[ins_cref(&ins[0]) as usize], Const::Str("10m".into()));
+    for bad in ["NEED time 5;", "NEED time abc;", "NEED time \"1m\";"] {
+        let e = format!("{:?}", c(&format!("{bad}\nstart {{ halt; }}")).err().expect(bad));
+        assert!(e.contains("NEED time expects a duration like 10m"), "{bad}: {e}");
+    }
+}
+
 fn ins_cref(i: &quicktzs_format::operands::Insn) -> u64 {
     let Arg::CRef(c) = i.args[1] else { panic!() };
     c

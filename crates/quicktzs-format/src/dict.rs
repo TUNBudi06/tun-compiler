@@ -114,7 +114,8 @@ pub struct RunExec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Perm {
-    /// kinds 1..=8; for `Mem` the "path" is the byte-count as text, e.g. "512mb".
+    /// kinds 1..=8 and 10; for `Mem` the "path" is the byte-count as text, e.g. "512mb"; for `Time` the
+    /// duration as text, e.g. "10m".
     Path { kind: PermKind, path: String },
     /// kind 9
     Run(RunExec),
@@ -297,6 +298,7 @@ mod tests {
                     Perm::Path { kind: PermKind::ReadDir, path: "/data".into() },
                     Perm::Path { kind: PermKind::Camera, path: String::new() },
                     Perm::Path { kind: PermKind::Mem, path: "512mb".into() },
+                    Perm::Path { kind: PermKind::Time, path: "10m".into() },
                     Perm::Run(RunExec {
                         path: "run/unpacker".into(),
                         desc: "Extract game files".into(),
@@ -440,6 +442,7 @@ mod tests {
         assert_eq!(row(Perm::Path { kind: PermKind::ReadDir, path: "/d".into() }), [1, 2, 0, b'/', b'd']);
         assert_eq!(row(Perm::Path { kind: PermKind::Camera, path: String::new() }), [5, 0, 0]);
         assert_eq!(row(Perm::Path { kind: PermKind::Mem, path: "1mb".into() }), [8, 3, 0, b'1', b'm', b'b']);
+        assert_eq!(row(Perm::Path { kind: PermKind::Time, path: "10m".into() }), [10, 3, 0, b'1', b'0', b'm']);
         // kind 9: path, desc, argc, (const: 0 len:2 val) (var: 1 len:1 name)
         assert_eq!(
             row(Perm::Run(RunExec {

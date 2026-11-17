@@ -31,7 +31,7 @@ u8_enum!(Arch, "arch", { Any = 0, X64 = 1, Arm64 = 2 });
 u8_enum!(Platform, "platform", { Any = 0, LinuxGlibc = 1, Termux = 2 });
 u8_enum!(
     PermKind, "permission kind",
-    { ReadDir = 1, WriteDir = 2, ReadFile = 3, WriteFile = 4, Camera = 5, Mic = 6, Net = 7, Mem = 8, RunExec = 9 }
+    { ReadDir = 1, WriteDir = 2, ReadFile = 3, WriteFile = 4, Camera = 5, Mic = 6, Net = 7, Mem = 8, RunExec = 9, Time = 10 }
 );
 u8_enum!(
     /// Value types (spec/03) and LFNT `ret_type`.
@@ -123,7 +123,7 @@ mod tests {
         assert!(Arch::try_from(3).is_err());
         assert!(Platform::try_from(3).is_err());
         assert!(PermKind::try_from(0).is_err());
-        assert!(PermKind::try_from(10).is_err());
+        assert!(PermKind::try_from(11).is_err());
         assert_eq!(PermKind::try_from(9).unwrap() as u8, 9);
         assert_eq!(ValueType::try_from(6).unwrap(), ValueType::Tuple);
         assert!(ValueType::try_from(7).is_err());

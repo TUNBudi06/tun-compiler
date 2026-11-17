@@ -133,6 +133,8 @@ fn launcher_allows(op: Opcode) -> bool {
 impl<'a, 'io> Vm<'a, 'io> {
     fn base(prog: &'a Program, io: &'a mut Io<'io>, env: Env, limits: Limits, launcher: Option<Launcher>) -> Self {
         let mem_limit = limits.mem.max(env.perms.mem.unwrap_or(0));
+        let mut limits = limits;
+        limits.timeout = limits.timeout.max(env.perms.time.unwrap_or_default());
         Vm {
             prog,
             io,
@@ -1252,6 +1254,15 @@ impl<'a, 'io> Vm<'a, 'io> {
                 self.env.perms.mem = Some(cur.max(n));
                 self.mem_limit = self.mem_limit.max(n);
             }
+            PermKind::Time => {
+                let d = ops::parse_dur(&text).ok_or_else(|| format!("bad NEED time duration '{text}'"))?;
+                self.env.perms.time = Some(self.env.perms.time.unwrap_or_default().max(d));
+                if d > self.limits.timeout {
+                    // the deadline was set at script start; move it by the same amount
+                    self.deadline += d - self.limits.timeout;
+                    self.limits.timeout = d;
+                }
+            }
             PermKind::ReadDir | PermKind::WriteDir | PermKind::ReadFile | PermKind::WriteFile => {
                 self.env.perms.add(kind, &text)
             }
@@ -1288,7 +1299,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             o => return Err(format!("append needs buf or str, got {}", o.type_name()).into()),
         };
         let path = self.env.perms.check(dst, Access::Write)?;
-        self.env.appends.append(&path, dst, data, self.deadline, self.mem_limit)
+        self.env.appends.append(&path, dst, data, self.deadline)
     }
 
     /// WRITE / WRITE_SLOT must not race a staged append on the same file.
@@ -1549,6 +1560,7 @@ fn kind_name(k: PermKind) -> &'static str {
         PermKind::Mic => "mic",
         PermKind::Net => "net",
         PermKind::Mem => "mem",
+        PermKind::Time => "time",
         PermKind::RunExec => "run_exec",
     }
 }

@@ -557,14 +557,13 @@ fn append_denied_outside_need_and_with_read_root() {
 }
 
 #[test]
-fn append_size_limit_checked_on_total() {
+fn append_is_not_limited_by_memory_limit() {
     let (d, need, path) = lw_setup("ap_lim", &vec![0u8; 100]);
     let o = RunOptions { mem_limit: Some(150), ..opts() };
-    // 100 existing + 30 + 30 > 150 on the second chunk: error, nothing committed
+    // 100 existing + 30 + 30 > 150: append streams to disk, so it still succeeds
     let r = ap(&need, &o, &path, &["012345678901234567890123456789", "012345678901234567890123456789"], Tail::Halt);
-    assert_eq!(r.code(), 1);
-    assert!(r.err.contains("out of memory"), "{}", r.err);
-    assert_eq!(std::fs::metadata(d.join("f.bin")).unwrap().len(), 100);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(std::fs::metadata(d.join("f.bin")).unwrap().len(), 160);
     only_f(&d);
 }
 

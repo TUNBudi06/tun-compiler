@@ -90,6 +90,13 @@ pub fn render_manifest(d: &Dict) -> String {
             let _ = writeln!(s, "{}{}", ob!("  up to "), escape(p));
         }
     }
+    let time = rows(&|k| k == PermKind::Time);
+    if !time.is_empty() {
+        let _ = writeln!(s, "{}", ob!("Run time:"));
+        for (_, p) in time {
+            let _ = writeln!(s, "{}{}", ob!("  run up to "), escape(p));
+        }
+    }
     let hw = rows(&|k| matches!(k, PermKind::Camera | PermKind::Mic | PermKind::Net));
     if !hw.is_empty() {
         let _ = writeln!(s, "{}", ob!("Camera / microphone / network:"));

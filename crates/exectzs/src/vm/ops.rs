@@ -236,6 +236,13 @@ pub fn parse_size(s: &str) -> Option<u64> {
     num.trim().parse::<u64>().ok()?.checked_mul(mul)
 }
 
+/// "90s", "10m", "2h".
+pub fn parse_dur(s: &str) -> Option<std::time::Duration> {
+    let t = s.trim().to_ascii_lowercase();
+    let (n, m) = if let Some(n) = t.strip_suffix('s') { (n, 1u64) } else if let Some(n) = t.strip_suffix('m') { (n, 60) } else { (t.strip_suffix('h')?, 3600) };
+    Some(std::time::Duration::from_secs(n.parse::<u64>().ok()?.checked_mul(m)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

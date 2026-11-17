@@ -64,3 +64,47 @@ fn sigterm_exits_143() {
     assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
     assert!(child_gone(&pid));
 }
+
+/// SIGINT while an `append` temp file is staged: temp removed, target never created.
+#[test]
+fn sigint_during_append_removes_temp_and_leaves_target_alone() {
+    use common::{lbl, sv, Asm, L::S};
+    let d = tmpdir("sig_ap");
+    let (data, tmp) = (d.join("data"), d.join("tmp"));
+    std::fs::create_dir(&data).unwrap();
+    std::fs::create_dir(&tmp).unwrap();
+    let target = data.join("f.bin");
+    let mut a = Asm::new();
+    a.need(2, &data.to_string_lossy());
+    a.let_(1, S(Box::leak(target.to_string_lossy().into_owned().into_boxed_str())));
+    a.buf(10, "x");
+    a.op(O::Append, &[sv(10), sv(1)]);
+    a.label("l").op(O::Jmp, &[lbl("l")]);
+    let script = a.build();
+    let mut c = vec![];
+    ins(&mut c, O::Run, &[Arg::Ref(8)]);
+    exit_code(&mut c, 0);
+    let perms = vec![Perm::Path { kind: quicktzs_format::types::PermKind::WriteDir, path: data.to_string_lossy().into_owned() }];
+    let pak = build(main_tun(c, vec![Const::Str("end".into())]), vec![Ent::tzst(8, "scripts/a.tzst", &script)], &Cfg { perms, ..Default::default() });
+    let pakf = d.join("a.pak");
+    std::fs::write(&pakf, pak).unwrap();
+    let mut ch = std::process::Command::new(env!("CARGO_BIN_EXE_exectzs"))
+        .args(["--dev", "--yes"])
+        .arg(&pakf)
+        .env("TMPDIR", &tmp)
+        .spawn()
+        .unwrap();
+    let has_tmp = || std::fs::read_dir(&data).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("quicktzs-tmp"));
+    for _ in 0..500 {
+        if has_tmp() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(has_tmp(), "append temp never appeared");
+    unsafe { libc::kill(ch.id() as i32, libc::SIGINT) };
+    let st = ch.wait().unwrap();
+    assert_eq!(st.code(), Some(130), "{st:?}");
+    assert!(!has_tmp(), "temp file left behind");
+    assert!(!target.exists(), "target must not be created");
+}

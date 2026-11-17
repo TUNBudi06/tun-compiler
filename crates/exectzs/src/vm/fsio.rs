@@ -22,6 +22,7 @@ pub struct Perms {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     pub mem: Option<u64>,
+    pub time: Option<std::time::Duration>,
 }
 
 fn lexical(p: &Path) -> PathBuf {
@@ -117,6 +118,21 @@ pub fn glob(dir: &Path, shown: &str, pat: &str) -> Result<Vec<String>, String> {
 static TMP_N: AtomicU64 = AtomicU64::new(0);
 const CHUNK: usize = 64 * 1024;
 
+/// Create the `.name.quicktzs-tmp-*` sibling of `p` (new, mode `mode`) and register it for signal
+/// cleanup. Every path that removes or renames the temp must call `untrack_tmp`.
+fn open_temp(p: &Path, shown: &str, mode: u32) -> R<(PathBuf, std::fs::File)> {
+    let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
+    let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .map_err(|e| format!("cannot write '{shown}': {e}"))?;
+    crate::sandbox::track_tmp(&tmp);
+    Ok((tmp, f))
+}
+
 fn timeout() -> Fault {
     Fault::Fatal(ExecError::new(1, "timeout"))
 }
@@ -155,15 +171,8 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     } else {
         data
     };
-    let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
-    let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
+    let (tmp, mut f) = open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))?;
     let res = (|| -> R<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))
-            .open(&tmp)
-            .map_err(|e| format!("cannot write '{shown}': {e}"))?;
         for chunk in content.chunks(CHUNK) {
             if Instant::now() >= deadline {
                 return Err(timeout());
@@ -184,6 +193,7 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    crate::sandbox::untrack_tmp(&tmp);
     res
 }
 
@@ -207,12 +217,10 @@ pub fn write_slot(
     if n > slot && !extend {
         *warn = Some(format!("warning: lwrite '{shown}': data {n} bytes > slot {slot}, cut {} bytes", n - slot));
     }
-    let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
-    let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
     let io = |e: std::io::Error| format!("cannot write '{shown}': {e}");
+    let mut src = std::fs::File::open(p).map_err(io)?;
+    let (tmp, mut f) = open_temp(p, shown, meta.permissions().mode() & 0o7777)?;
     let res = (|| -> R<()> {
-        let mut src = std::fs::File::open(p).map_err(io)?;
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(meta.permissions().mode() & 0o7777).open(&tmp).map_err(io)?;
         let mut buf = vec![0u8; CHUNK];
         // copy `len` bytes of src to f (src is positioned sequentially)
         let mut copy = |src: &mut std::fs::File, f: &mut std::fs::File, mut len: u64| -> R<()> {
@@ -259,6 +267,7 @@ pub fn write_slot(
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    crate::sandbox::untrack_tmp(&tmp);
     res
 }
 
@@ -338,8 +347,8 @@ impl Appends {
         self.0.iter().any(|s| s.path == p)
     }
 
-    /// `limit` caps the size of the final file (checked on the total, before any data is copied).
-    pub fn append(&mut self, p: &Path, shown: &str, data: &[u8], deadline: Instant, limit: u64) -> R<()> {
+    /// Streams to disk, so it is not capped by the memory limit.
+    pub fn append(&mut self, p: &Path, shown: &str, data: &[u8], deadline: Instant) -> R<()> {
         let io = |e: std::io::Error| format!("cannot write '{shown}': {e}");
         let i = match self.0.iter().position(|s| s.path == p) {
             Some(i) => i,
@@ -354,18 +363,7 @@ impl Appends {
                     Err(e) => return Err(io(e).into()),
                 };
                 let old = meta.as_ref().map_or(0, |m| m.len());
-                if old.saturating_add(data.len() as u64) > limit {
-                    return Err("out of memory".into());
-                }
-                let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
-                let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))
-                    .open(&tmp)
-                    .map_err(io)?;
-                crate::sandbox::track_tmp(&tmp);
+                let (tmp, file) = open_temp(p, shown, meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))?;
                 // from here Drop of `st` removes the temp on any error
                 let mut st = Staged { path: p.to_path_buf(), tmp, file, perm: meta.map(|m| m.permissions()), size: 0 };
                 if old > 0 {
@@ -388,9 +386,6 @@ impl Appends {
             }
         };
         let s = &mut self.0[i];
-        if s.size.saturating_add(data.len() as u64) > limit {
-            return Err("out of memory".into());
-        }
         for c in data.chunks(CHUNK) {
             if Instant::now() >= deadline {
                 return Err(timeout());

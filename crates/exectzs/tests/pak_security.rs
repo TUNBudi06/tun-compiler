@@ -402,6 +402,7 @@ fn perm_cfg(k: &Keys, out: &std::path::Path) -> (Cfg, Vec<Ent>) {
         Perm::Path { kind: PermKind::ReadDir, path: "/data/in".into() },
         Perm::Path { kind: PermKind::WriteFile, path: "/data/out.txt".into() },
         Perm::Path { kind: PermKind::Mem, path: "512mb".into() },
+        Perm::Path { kind: PermKind::Time, path: "10m".into() },
         Perm::Path { kind: PermKind::Net, path: String::new() },
         Perm::Run(RunExec {
             path: "run/w.sh".into(),
@@ -433,7 +434,7 @@ fn manifest_lists_everything_and_escapes_descriptions() {
     let opts = RunOptions { assume_yes: true, ..base_opts(trust_for(&k, 1, None)) };
     let r = run(&pak, &opts, "");
     assert_eq!(r.res, Ok(7), "{}", r.err);
-    for want in ["/data/in", "/data/out.txt", "512mb", "network", "run/w.sh", "const-arg-1", "pick", "value shown at run time", "Description (maker's claim):", "App ID", "Pak version: 5"] {
+    for want in ["/data/in", "/data/out.txt", "512mb", "run up to 10m", "network", "run/w.sh", "const-arg-1", "pick", "value shown at run time", "Description (maker's claim):", "App ID", "Pak version: 5"] {
         assert!(r.out.contains(want), "manifest lacks {want:?}:\n{}", r.out);
     }
     assert!(!r.out.contains('\x1b') && !r.out.contains('\r') && !r.out.contains('\u{202e}'), "raw control chars leaked: {:?}", r.out);
