@@ -71,7 +71,11 @@ fn children_do_not_inherit_the_signal_pipe() {
     let perms = vec![Perm::Run(RunExec { path: "run/s.sh".into(), desc: "t".into(), args: vec![] })];
     std::fs::write(&pak, build(main_tun(c, vec![Const::Str("end".into())]), vec![Ent::exe(7, "run/s.sh", &body)], &Cfg { perms, ..Default::default() })).unwrap();
     // The binary installs the signal pipe; stdio is /dev/null so any `pipe:` seen is the leaked one.
-    let st = std::process::Command::new(env!("CARGO_BIN_EXE_exectzs"))
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_exectzs"));
+    // Runners/cargo may leak pipe fds into the test; start exectzs with only 0-2 so any `pipe:` is its own.
+    unsafe { cmd.pre_exec(|| { for fd in 3..1024 { libc::close(fd); } Ok(()) }) };
+    let st = cmd
         .args(["--dev", "--yes"])
         .arg(&pak)
         .stdin(std::process::Stdio::null())
