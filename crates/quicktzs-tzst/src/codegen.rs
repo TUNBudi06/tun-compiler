@@ -708,6 +708,14 @@ impl Gen {
                 let (b, d, o) = (self.src(b)?, self.src(d)?, self.src(o)?);
                 self.ins(O::Write, &[Arg::Src(b), Arg::Src(d), Arg::Src(o)])
             }
+            SK::LWrite(b, d, o, s, ext, fill) => {
+                let (b, d, o, s) = (self.src(b)?, self.src(d)?, self.src(o)?, self.src(s)?);
+                let f = match fill {
+                    Some(f) => self.const_u8(f)?,
+                    None => 0,
+                };
+                self.ins(O::WriteSlot, &[Arg::Src(b), Arg::Src(d), Arg::Src(o), Arg::Src(s), Arg::U8(*ext as u8), Arg::U8(f)])
+            }
             SK::Input(n, prompt) => {
                 let c = self.konst(Const::Str(prompt.clone()));
                 let v = self.def(n)?;

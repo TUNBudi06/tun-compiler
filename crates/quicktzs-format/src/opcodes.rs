@@ -115,6 +115,7 @@ opcodes! {
     ReadStr = 0x0075, "READSTR";
     Find = 0x0076, "FIND";
     Write = 0x0077, "WRITE";
+    WriteSlot = 0x0078, "WRITE_SLOT";
     Align = 0x006D, "ALIGN";
     Padding = 0x00AE, "PADDING";
     HexRange = 0x00AF, "HEX_RANGE";

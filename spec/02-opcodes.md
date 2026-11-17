@@ -114,6 +114,10 @@ Operand notation:
 0x0075  READSTR    @v <src> <off> <len>
 0x0076  FIND       @v <buf> <pat>
 0x0077  WRITE      <buf> <dst> <off>
+0x0078  WRITE_SLOT <buf> <dst> <off> <slot> <mode:1B> <fill:1B>
+                   (lwrite: replace the slot bytes at off of file dst with buf, padded with fill;
+                    mode 0 = patch (cut if longer), 1 = extend (shift the tail); other mode = runtime
+                    "bad operand"; same NEED write gate as WRITE; atomic + streaming)
 0x006D  ALIGN      @v <n:1B>              (advance read position to multiple of n)
 0x00AE  PADDING    @v <n:1B> <byte:1B>    (append byte until len % n == 0)
 0x00AF  HEX_RANGE  @v <off> <len>         (hex of a buffer slice, for print/debug)

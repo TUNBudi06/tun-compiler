@@ -174,6 +174,8 @@ pub enum SK {
     /// true = big
     Endian(bool),
     Write(Expr, Expr, Expr),
+    /// buf, path, off, slot, extend?, fill
+    LWrite(Expr, Expr, Expr, Expr, bool, Option<Expr>),
     Input(String, String),
     Print(Expr),
     Exit(u8, String),
@@ -512,6 +514,26 @@ impl P<'_> {
                         self.expect("->")?;
                         let d = self.operand()?;
                         SK::Write(b, d, self.operand()?)
+                    }
+                    "lwrite" => {
+                        let b = self.operand()?;
+                        self.expect("->")?;
+                        let d = self.operand()?;
+                        let o = self.operand()?;
+                        let s = self.operand()?;
+                        let mut extend = false;
+                        if self.is_ident("extend") {
+                            self.next()?;
+                            extend = true;
+                        } else if self.is_ident("patch") {
+                            self.next()?;
+                        }
+                        let mut fill = None;
+                        if self.is_ident("fill") {
+                            self.next()?;
+                            fill = Some(self.operand()?);
+                        }
+                        SK::LWrite(b, d, o, s, extend, fill)
                     }
                     "input" => {
                         let n = self.var_name()?;

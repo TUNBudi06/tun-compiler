@@ -480,3 +480,21 @@ fn multi_level_index_assign() {
     let ops: Vec<_> = decode_all(&o.file.tun.code, Width::W4).unwrap().into_iter().map(|i| i.op).collect();
     assert!(ops.iter().filter(|o| **o == O::ArrSet).count() >= 2 && ops.contains(&O::ObjGet) && ops.contains(&O::ArrGet));
 }
+
+#[test]
+fn lwrite_compiles_and_disassembles() {
+    let o = ok("NEED write \"/d\";\nstart { let @b = \"hi\"; let @n = 4; lwrite @b -> \"/d/f\" @n 8; lwrite @b -> \"/d/f\" 0 @n + 1 extend fill 0xFF; lwrite @b -> \"/d/f\" 0 2 patch; }");
+    let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
+    let ws: Vec<_> = ins.iter().filter(|i| i.op == O::WriteSlot).collect();
+    assert_eq!(ws.len(), 3);
+    let tail = |i: &quicktzs_format::operands::Insn| (i.args[4].clone(), i.args[5].clone());
+    assert_eq!(tail(ws[0]), (Arg::U8(0), Arg::U8(0)));
+    assert_eq!(tail(ws[1]), (Arg::U8(1), Arg::U8(255)));
+    assert_eq!(tail(ws[2]), (Arg::U8(0), Arg::U8(0)));
+    let d = disassemble(&o.file.tun.code, &o.file.tun.consts, Width::W4).unwrap();
+    assert!(d.contains("WRITE_SLOT"), "{d}");
+    sane(&o, Width::W4);
+    assert!(c("start { let @b = \"x\"; lwrite @b -> \"/f\" 0 1 fill 300; }").is_err());
+    assert!(c("start { let @b = \"x\"; lwrite @b -> \"/f\" 0 1 fill @b; }").is_err());
+    assert!(c("start { let @b = \"x\"; lwrite @b -> \"/f\" 0 1 }").is_err());
+}

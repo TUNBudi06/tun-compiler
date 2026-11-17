@@ -261,3 +261,24 @@ start {
     }
 }
 ```
+
+## `lwrite` (log write into a fixed slot)
+
+```
+lwrite <buf-expr> -> <path-expr> <off-expr> <slot-expr> [patch|extend] [fill <byte-const>];
+```
+
+Replaces the slot `[off, off+slot)` of an EXISTING file F with data D (n bytes; buf or str).
+Defaults: `patch`, `fill 0`. `fill` is a constant 0..255. Compiles to `WRITE_SLOT` (spec/02).
+Same permission rules as `write` (path under a NEED write root in the signed table) and the same
+timeout. The file is streamed into a temp file next to F in chunks (memory O(chunk + n), never
+O(file)), fsynced, and renamed over F keeping its mode; on error or timeout the temp is removed and
+F is untouched.
+
+| Case | mode | Result |
+|---|---|---|
+| `n <= slot` | patch / extend | `F[off..off+n] = D`, `F[off+n..off+slot] = fill`; size unchanged |
+| `n > slot` | patch | only `D[..slot]` written; STDERR `warning: lwrite '<path>': data <n> bytes > slot <slot>, cut <n-slot> bytes`; size unchanged |
+| `n > slot` | extend | new file = `F[..off] + D + F[off+slot..]`; grows by `n-slot`; no warning |
+| `off+slot > len(F)` | any | runtime error `lwrite: slot runs past end of file (off=…, slot=…, file=…)` |
+| `slot == 0`, `off < 0`, or F missing | any | runtime error (a missing file is NOT created) |

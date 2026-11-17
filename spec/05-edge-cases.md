@@ -90,3 +90,18 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | timeout while writing a file | write to temp, rename on success (atomic); timeout → temp discarded, original intact |
 | memory limit hit mid-operation | clean error "out of memory"; `ON_EXIT` still runs |
 | `ON_EXIT` itself slow/infinite | its own 5s timeout, then forced stop |
+
+## lwrite (WRITE_SLOT)
+
+| Case | Behavior |
+|---|---|
+| `lwrite` data longer than slot, patch (default) | first `slot` bytes written, STDERR warning `data <n> bytes > slot <slot>, cut <n-slot> bytes`, size unchanged |
+| `lwrite` data longer than slot, `extend` | tail shifted forward, file grows by `n-slot`, no warning |
+| `lwrite` data shorter than slot | remainder of slot filled with `fill` (default 0), size unchanged |
+| `off+slot` past end of file | error `lwrite: slot runs past end of file (off=…, slot=…, file=…)`, file untouched |
+| `slot` is 0 | runtime error, file untouched |
+| target file does not exist | runtime error, nothing created |
+| path outside any NEED write root | exit 126, same as `write` |
+| `mode` operand not 0/1 | runtime "bad operand" error |
+| timeout / error mid-copy | temp file removed, original intact |
+| very large file (e.g. 64MB, `NEED mem 16mb`) | succeeds: memory is O(chunk + n), file is never loaded |

@@ -334,6 +334,14 @@ impl Ck {
                     self.expr(x)?;
                 }
             }
+            SK::LWrite(a, b, c, d, _, fill) => {
+                for x in [a, b, c, d] {
+                    self.expr(x)?;
+                }
+                if let Some(f) = fill {
+                    self.small_const(f, 0, "lwrite fill")?;
+                }
+            }
             SK::Input(n, _) => {
                 self.defined.insert(n.clone());
             }

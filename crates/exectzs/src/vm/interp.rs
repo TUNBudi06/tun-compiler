@@ -831,6 +831,7 @@ impl<'a, 'io> Vm<'a, 'io> {
                 self.cur.vars.set(a_var(insn, 0), Value::Int(ops::find_bytes(&hay, &pat)));
             }
             O::Write => self.op_write(insn)?,
+            O::WriteSlot => self.op_write_slot(insn)?,
             O::Align => {
                 let n = a_u8(insn, 1) as i128;
                 if n == 0 {
@@ -1225,6 +1226,33 @@ impl<'a, 'io> Vm<'a, 'io> {
         }
         let path = self.env.perms.check(dst, Access::Write)?;
         fsio::write_atomic(&path, dst, data, off as u64, self.deadline, self.mem_limit)
+    }
+
+    fn op_write_slot(&mut self, insn: &Insn) -> R<()> {
+        let slot = self.int_src(a_src(insn, 3), "slot")?;
+        let off = self.int_src(a_src(insn, 2), "offset")?;
+        let dst = self.src(a_src(insn, 1))?;
+        let data = self.src(a_src(insn, 0))?;
+        let (mode, fill) = (a_u8(insn, 4), a_u8(insn, 5));
+        if mode > 1 {
+            return Err(format!("lwrite: bad operand (mode {mode})").into());
+        }
+        let dst = str_of(&dst, "lwrite destination")?;
+        let data: &[u8] = match &data {
+            Value::Buf(b) => b,
+            Value::Str(s) => s.as_bytes(),
+            o => return Err(format!("lwrite needs buf or str, got {}", o.type_name()).into()),
+        };
+        if off < 0 || slot <= 0 {
+            return Err(format!("lwrite: offset must be >= 0 and slot > 0 (off={off}, slot={slot})").into());
+        }
+        let path = self.env.perms.check(dst, Access::Write)?;
+        let mut warn = None;
+        fsio::write_slot(&path, dst, data, off as u64, slot as u64, mode == 1, fill, self.deadline, &mut warn)?;
+        if let Some(w) = warn {
+            let _ = writeln!(self.io.err, "{w}");
+        }
+        Ok(())
     }
 
     fn op_select(&mut self, list: Value, prompt: &str, multi: bool) -> R<Value> {

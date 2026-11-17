@@ -187,6 +187,81 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     res
 }
 
+/// `lwrite`: replace the `slot` bytes at `off` with `data` (padded with `fill`; longer data is cut in
+/// patch mode, or shifts the tail in extend mode). Streams F into a temp file in CHUNK pieces, so
+/// memory is O(CHUNK + data). Temp is removed on any error/timeout; F is untouched until rename.
+#[allow(clippy::too_many_arguments)]
+pub fn write_slot(
+    p: &Path, shown: &str, data: &[u8], off: u64, slot: u64, extend: bool, fill: u8, deadline: Instant, warn: &mut Option<String>,
+) -> R<()> {
+    let meta = match std::fs::metadata(p) {
+        Ok(m) if m.is_dir() => return Err(format!("cannot write '{shown}': is a directory").into()),
+        Ok(m) => m,
+        Err(e) => return Err(format!("cannot write '{shown}': {e}").into()),
+    };
+    let flen = meta.len();
+    if off.checked_add(slot).map_or(true, |e| e > flen) {
+        return Err(format!("lwrite: slot runs past end of file (off={off}, slot={slot}, file={flen})").into());
+    }
+    let n = data.len() as u64;
+    if n > slot && !extend {
+        *warn = Some(format!("warning: lwrite '{shown}': data {n} bytes > slot {slot}, cut {} bytes", n - slot));
+    }
+    let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
+    let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
+    let io = |e: std::io::Error| format!("cannot write '{shown}': {e}");
+    let res = (|| -> R<()> {
+        let mut src = std::fs::File::open(p).map_err(io)?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(meta.permissions().mode() & 0o7777).open(&tmp).map_err(io)?;
+        let mut buf = vec![0u8; CHUNK];
+        // copy `len` bytes of src to f (src is positioned sequentially)
+        let mut copy = |src: &mut std::fs::File, f: &mut std::fs::File, mut len: u64| -> R<()> {
+            while len > 0 {
+                if Instant::now() >= deadline {
+                    return Err(timeout());
+                }
+                let k = len.min(CHUNK as u64) as usize;
+                src.read_exact(&mut buf[..k]).map_err(io)?;
+                f.write_all(&buf[..k]).map_err(io)?;
+                len -= k as u64;
+            }
+            Ok(())
+        };
+        copy(&mut src, &mut f, off)?;
+        let keep = if extend { data } else { &data[..data.len().min(slot as usize)] };
+        for c in keep.chunks(CHUNK) {
+            if Instant::now() >= deadline {
+                return Err(timeout());
+            }
+            f.write_all(c).map_err(io)?;
+        }
+        let mut pad = slot.saturating_sub(keep.len() as u64);
+        let fb = vec![fill; CHUNK];
+        while pad > 0 {
+            if Instant::now() >= deadline {
+                return Err(timeout());
+            }
+            let k = pad.min(CHUNK as u64) as usize;
+            f.write_all(&fb[..k]).map_err(io)?;
+            pad -= k as u64;
+        }
+        src.seek(SeekFrom::Start(off + slot)).map_err(io)?;
+        copy(&mut src, &mut f, flen - off - slot)?;
+        if Instant::now() >= deadline {
+            return Err(timeout());
+        }
+        f.sync_all().map_err(io)?;
+        let _ = f.set_permissions(meta.permissions());
+        drop(f);
+        std::fs::rename(&tmp, p).map_err(io)?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

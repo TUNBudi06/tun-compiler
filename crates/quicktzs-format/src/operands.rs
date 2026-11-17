@@ -57,6 +57,7 @@
 //! | READSTR | @v src off len | @v = str (utf-8, lossy; trailing NULs stripped) |
 //! | FIND | @v buf pat | @v = byte offset of pat (buf or str) in buf, or -1 |
 //! | WRITE | buf dst off | write buf (buf or str) to file path `dst` at byte offset `off`; atomic (temp+rename); path must be inside a NEED write root |
+//! | WRITE_SLOT | buf dst off slot mode:1B fill:1B | `lwrite`: replace the `slot` bytes at `off` of file `dst` with buf, padded with `fill` (mode 0 patch: cut if longer; mode 1 extend: shift the tail); atomic + streaming; NEED write root required |
 //! | ALIGN | @v n:1B | @v (int) rounded up to a multiple of n; n == 0 → runtime error |
 //! | PADDING | @v n:1B byte:1B | append `byte` to buf @v until len % n == 0 |
 //! | HEX_RANGE | @v off len | push hex string of buf slice |
@@ -198,6 +199,7 @@ pub fn operands(op: Opcode) -> &'static [Kind] {
         O::ReadStr => &[Var, Src, Src, Src],
         O::Find => &[Var, Src, Src],
         O::Write => &[Src, Src, Src],
+        O::WriteSlot => &[Src, Src, Src, Src, U8, U8],
         O::Align => &[Var, U8],
         O::Padding => &[Var, U8, U8],
         O::HexRange | O::Slice => &[Var, Src, Src],

@@ -296,3 +296,160 @@ fn files_glob_then_select_then_read_full_example() {
     let r = run_with(&a.build(), &opts(), "1\n");
     assert!(r.out.ends_with("magic ok\n"), "{r:?}");
 }
+
+// ---------------- lwrite (WRITE_SLOT) ----------------
+
+fn lw(need: &[(u8, String)], opts: &RunOptions, path: &str, data: &str, off: i64, slot: i64, mode: u8, fill: u8) -> Out {
+    let mut a = Asm::new();
+    for (k, d) in need {
+        a.need(*k, d);
+    }
+    a.buf(0, data);
+    a.let_(1, S(Box::leak(path.to_string().into_boxed_str())));
+    let (ko, ks) = (a.k_i(off), a.k_i(slot));
+    a.op(O::WriteSlot, &[sv(0), sv(1), sk(ko), sk(ks), u(mode), u(fill)]);
+    a.halt();
+    run_with(&a.build(), opts, "")
+}
+
+/// File "0123456789" (slot at 2..6) in a fresh dir; returns (dir, need, path).
+fn lw_setup(name: &str, content: &[u8]) -> (std::path::PathBuf, Vec<(u8, String)>, String) {
+    let d = tmpdir(name);
+    std::fs::write(d.join("f.bin"), content).unwrap();
+    let need = vec![(WRITE_DIR, d.to_string_lossy().into_owned())];
+    let path = p(&d, "f.bin");
+    (d, need, path)
+}
+
+fn only_f(d: &Path) {
+    assert_eq!(entries(d), ["f.bin"], "temp file left behind");
+}
+
+fn rd(d: &Path) -> Vec<u8> {
+    std::fs::read(d.join("f.bin")).unwrap()
+}
+
+#[test]
+fn lwrite_patch_smaller_pads_with_fill() {
+    let (d, need, path) = lw_setup("lw_small", b"0123456789");
+    let r = lw(&need, &opts(), &path, "ab", 2, 4, 0, 0);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(rd(&d), b"01ab\0\x006789");
+    assert!(r.err.is_empty(), "{}", r.err);
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_patch_exact() {
+    let (d, need, path) = lw_setup("lw_exact", b"0123456789");
+    assert_eq!(lw(&need, &opts(), &path, "abcd", 2, 4, 0, 0).code(), 0);
+    assert_eq!(rd(&d), b"01abcd6789");
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_patch_bigger_cuts_and_warns() {
+    let (d, need, path) = lw_setup("lw_cut", b"0123456789");
+    let r = lw(&need, &opts(), &path, "abcdefg", 2, 4, 0, 0);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(rd(&d), b"01abcd6789");
+    assert!(r.err.contains(&format!("warning: lwrite '{path}': data 7 bytes > slot 4, cut 3 bytes")), "{}", r.err);
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_extend_bigger_grows_and_shifts() {
+    let (d, need, path) = lw_setup("lw_ext", b"0123456789");
+    let r = lw(&need, &opts(), &path, "abcdefg", 2, 4, 1, 0);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(rd(&d), b"01abcdefg6789");
+    assert!(r.err.is_empty(), "no warning in extend mode: {}", r.err);
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_extend_smaller_same_as_patch() {
+    let (d, need, path) = lw_setup("lw_ext_small", b"0123456789");
+    assert_eq!(lw(&need, &opts(), &path, "ab", 2, 4, 1, 0).code(), 0);
+    assert_eq!(rd(&d), b"01ab\0\x006789");
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_custom_fill() {
+    let (d, need, path) = lw_setup("lw_fill", b"0123456789");
+    assert_eq!(lw(&need, &opts(), &path, "ab", 2, 4, 0, 0xFF).code(), 0);
+    assert_eq!(rd(&d), b"01ab\xFF\xFF6789");
+}
+
+#[test]
+fn lwrite_errors_leave_file_untouched() {
+    let (d, need, path) = lw_setup("lw_err", b"0123456789");
+    // slot past EOF (also the exact-boundary case 6+4 == 10 is fine)
+    let r = lw(&need, &opts(), &path, "ab", 8, 4, 0, 0);
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("lwrite: slot runs past end of file (off=8, slot=4, file=10)"), "{}", r.err);
+    // slot 0
+    let r = lw(&need, &opts(), &path, "ab", 2, 0, 0, 0);
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("slot"), "{}", r.err);
+    // bad mode
+    let r = lw(&need, &opts(), &path, "ab", 2, 4, 2, 0);
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("bad operand"), "{}", r.err);
+    // missing file: error, and NOT created
+    let r = lw(&need, &opts(), &p(&d, "nope.bin"), "ab", 0, 1, 0, 0);
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("cannot write"), "{}", r.err);
+    assert_eq!(rd(&d), b"0123456789");
+    only_f(&d);
+    // boundary ok
+    assert_eq!(lw(&need, &opts(), &path, "ab", 6, 4, 0, 0).code(), 0);
+    assert_eq!(rd(&d), b"012345ab\0\0");
+}
+
+#[test]
+fn lwrite_outside_need_is_denied() {
+    let (d, _, path) = lw_setup("lw_deny", b"0123456789");
+    let other = tmpdir("lw_deny_other");
+    let need = [(WRITE_DIR, other.to_string_lossy().into_owned())];
+    denied(&lw(&need, &opts(), &path, "ab", 2, 4, 0, 0));
+    // read-only root does not grant write
+    denied(&lw(&[(READ_DIR, d.to_string_lossy().into_owned())], &opts(), &path, "ab", 2, 4, 0, 0));
+    assert_eq!(rd(&d), b"0123456789");
+}
+
+#[test]
+fn lwrite_timeout_leaves_file_untouched() {
+    let d = tmpdir("lw_timeout");
+    let big = vec![7u8; 8 << 20];
+    std::fs::write(d.join("f.bin"), &big).unwrap();
+    let need = [(WRITE_DIR, d.to_string_lossy().into_owned())];
+    let o = RunOptions { timeout_ms: Some(0), ..opts() };
+    let r = lw(&need, &o, &p(&d, "f.bin"), "ab", 1 << 20, 1 << 20, 0, 0);
+    assert_ne!(r.code(), 0);
+    assert_eq!(std::fs::read(d.join("f.bin")).unwrap(), big);
+    only_f(&d);
+}
+
+#[test]
+fn lwrite_streams_large_file_under_low_mem_limit() {
+    let d = tmpdir("lw_stream");
+    let f = std::fs::File::create(d.join("f.bin")).unwrap();
+    f.set_len(64 << 20).unwrap(); // sparse
+    let need = [(WRITE_DIR, d.to_string_lossy().into_owned())];
+    let o = RunOptions { mem_limit: Some(16 << 20), timeout_ms: Some(60_000), ..opts() };
+    let r = lw(&need, &o, &p(&d, "f.bin"), "HEAD", 20 << 20, 8 << 20, 0, 0xAB);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(std::fs::metadata(d.join("f.bin")).unwrap().len(), 64 << 20);
+    let mut f = std::fs::File::open(d.join("f.bin")).unwrap();
+    use std::io::{Read, Seek, SeekFrom};
+    let mut b = [0u8; 8];
+    f.seek(SeekFrom::Start(20 << 20)).unwrap();
+    f.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"HEAD\xAB\xAB\xAB\xAB");
+    f.seek(SeekFrom::Start((28 << 20) - 1)).unwrap();
+    f.read_exact(&mut b[..2]).unwrap();
+    assert_eq!(&b[..2], [0xAB, 0]);
+    only_f(&d);
+}
