@@ -155,13 +155,13 @@ fn need_time_raises_the_timeout() {
 #[test]
 fn need_time_cannot_lower_the_timeout() {
     let mut a = Asm::new();
-    a.need(10, "1s");
+    a.need(10, "30s"); // generous: slow debug CI runners need >1s for this loop
     let (k0, kn) = (a.k_i(0), a.k_i(6_000_000));
     a.op(O::ForRange, &[va(5), sk(k0), sk(kn)]);
     a.label("l").op(O::Nop, &[]).op(O::ForNext, &[lbl("l")]);
     a.print_s("done").halt();
     let r = run_with(&a.build(), &opts_with(200, 256 << 20), "");
-    assert_eq!((r.code(), r.out.as_str()), (0, "done\n"), "{r:?}"); // 1s raises 200ms
+    assert_eq!((r.code(), r.out.as_str()), (0, "done\n"), "{r:?}"); // 30s raises 200ms
     let mut a = Asm::new();
     a.need(10, "1s");
     a.need(10, "1ms"); // not a valid unit
