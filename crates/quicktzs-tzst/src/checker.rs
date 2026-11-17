@@ -119,7 +119,7 @@ pub fn ty_of(e: &Expr, vars: &HashMap<String, Ty>, sigs: &Sigs) -> Ty {
             _ => Ty::Unknown,
         },
         EK::Prefix(p, args) => match p {
-            Pre::ReadU8 | Pre::ReadU16 | Pre::ReadU32 | Pre::ReadU64 | Pre::Indexof | Pre::Contains | Pre::Find => Ty::Int,
+            Pre::ReadU8 | Pre::ReadU16 | Pre::ReadU32 | Pre::ReadU64 | Pre::Indexof | Pre::Contains | Pre::Find | Pre::FileSize | Pre::FindLoc => Ty::Int,
             Pre::ReadStr | Pre::Substr | Pre::Join | Pre::Trim => Ty::Str,
             Pre::Read => Ty::Buf,
             Pre::Split | Pre::Keys | Pre::Values | Pre::Glob | Pre::SelectMulti => Ty::Arr,
@@ -331,6 +331,11 @@ impl Ck {
             SK::Endian(_) => self.endian_set = true,
             SK::Write(a, b, c) => {
                 for x in [a, b, c] {
+                    self.expr(x)?;
+                }
+            }
+            SK::Append(a, b) => {
+                for x in [a, b] {
                     self.expr(x)?;
                 }
             }

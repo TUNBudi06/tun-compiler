@@ -116,6 +116,9 @@ opcodes! {
     Find = 0x0076, "FIND";
     Write = 0x0077, "WRITE";
     WriteSlot = 0x0078, "WRITE_SLOT";
+    FileSize = 0x0079, "FILE_SIZE";
+    FindLoc = 0x007A, "FINDLOC";
+    Append = 0x007B, "APPEND";
     Align = 0x006D, "ALIGN";
     Padding = 0x00AE, "PADDING";
     HexRange = 0x00AF, "HEX_RANGE";

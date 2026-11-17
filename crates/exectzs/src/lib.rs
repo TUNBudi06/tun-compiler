@@ -145,6 +145,7 @@ pub fn run_tzst(file: &quicktzs_format::tzst::TzstFile, opts: &RunOptions, io: &
         ver: 0,
         last_exit: 0,
         perms: Default::default(),
+        appends: Default::default(),
         term_color: opts.term_color,
     };
     let mut vm = vm::interp::Vm::script(&prog, io, env, vm::interp::Limits::from_opts(opts));
@@ -179,6 +180,7 @@ fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io)
             ver: pak.dict.header.pak_version as i64,
             last_exit: 0,
             perms: Default::default(),
+            appends: Default::default(),
             term_color: opts.term_color,
         };
         let mut vm = vm::interp::Vm::script(&unit.prog, io, env, vm::interp::Limits::from_opts(opts)).with_services(&svc);

@@ -282,3 +282,28 @@ F is untouched.
 | `n > slot` | extend | new file = `F[..off] + D + F[off+slot..]`; grows by `n-slot`; no warning |
 | `off+slot > len(F)` | any | runtime error `lwrite: slot runs past end of file (off=…, slot=…, file=…)` |
 | `slot == 0`, `off < 0`, or F missing | any | runtime error (a missing file is NOT created) |
+
+## `fsize`, `findloc`, `append`
+
+```
+let @n = fsize <path-expr>;                       # Int, size in bytes
+let @o = findloc <path-expr> <pat-expr> [<from-expr>];   # Int, absolute offset or -1
+append <buf-expr> -> <path-expr>;
+```
+
+`fsize` compiles to `FILE_SIZE`, `findloc` to `FINDLOC` (an omitted `from` becomes the constant 0, so
+the opcode always has 3 sources), `append` to `APPEND` (spec/02). `fsize` and `findloc` need a NEED
+read root for the path; `append` needs a NEED write root and has the same limits as `write` (the size
+limit applies to the final total).
+
+`findloc` streams the file in 64 KiB chunks with `len(pat)-1` bytes of overlap (memory
+O(chunk + pat), never O(file)); matches across chunk boundaries are found.
+
+`append` stages: the first append to a path creates a temp file next to the target (the existing
+content, if any, is copied in once); later appends write straight to that temp. When the program
+ends normally (end of `start`, `halt`, or `exit N` with any N; after `on exit` handlers, including
+scripts started with `run`; a module commits once, when `main.tun` itself ends normally) each temp is fsynced and renamed over its target, keeping its mode. On a
+runtime error, timeout, SIGINT/SIGTERM/SIGHUP or panic the temps are removed and the targets are
+untouched. At most 64 paths may be staged at once. While a path is staged, `write`/`lwrite` to it
+fail with `append in progress on '<path>'`; `read`/`fsize`/`findloc` keep seeing the OLD file until the
+commit.

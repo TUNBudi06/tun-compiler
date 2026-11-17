@@ -54,6 +54,8 @@ pub struct Env {
     /// `$?`
     pub last_exit: i32,
     pub perms: Perms,
+    /// staged `append` files of the whole program (moves with the Env into RUN'd scripts)
+    pub appends: fsio::Appends,
     /// Force `$TERM_COLOR` (None = detect).
     pub term_color: Option<bool>,
 }
@@ -114,6 +116,8 @@ pub struct Vm<'a, 'io> {
     cur_off: usize,
     mem_limit: u64,
     pending: u64,
+    /// outermost script: only it commits staged appends (a RUN'd script sets this false)
+    top: bool,
 }
 
 fn launcher_allows(op: Opcode) -> bool {
@@ -152,6 +156,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             cur_off: 0,
             mem_limit,
             pending: 0,
+            top: true,
         }
     }
 
@@ -164,6 +169,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             ver: svc.pak.dict.header.pak_version as i64,
             last_exit: 0,
             perms: Perms::default(),
+            appends: Default::default(),
             term_color: opts.term_color,
         };
         let l = Launcher { loaded: vec![], perm_ids: vec![] };
@@ -192,7 +198,8 @@ impl<'a, 'io> Vm<'a, 'io> {
             return Ok(0);
         }
         match self.run_steps() {
-            Ok(c) => Ok(c),
+            // staged appends of every script this launcher RAN are committed once, at the end
+            Ok(c) => self.env.appends.commit().map(|()| c).map_err(fault_to_exec),
             Err(e) => Err(fault_to_exec(e)),
         }
     }
@@ -201,14 +208,28 @@ impl<'a, 'io> Vm<'a, 'io> {
     /// code (1, or 126 for permission violations). ON_EXIT runs afterwards, once.
     pub fn run_script(&mut self) -> i32 {
         self.deadline = Instant::now() + self.limits.timeout;
-        let code = match self.run_to_end() {
-            End::Code(c) => c,
+        let res = self.run_to_end();
+        let code = match &res {
+            End::Code(c) => *c,
             End::Err { code, msg } => {
                 let _ = writeln!(self.io.err, "error: {msg}");
-                code
+                *code
             }
         };
+        let ended_ok = matches!(res, End::Code(_));
         self.run_on_exit();
+        // Commit staged appends once the whole program ended normally (after ON_EXIT); an error,
+        // timeout or fatal end leaves them to be dropped (= discarded) with the Env.
+        if !ended_ok {
+            // also when a RUN'd script failed: its caller only sees an exit code, not an error
+            self.env.appends = Default::default();
+        }
+        if self.top && ended_ok {
+            if let Err(f) = self.env.appends.commit() {
+                let _ = writeln!(self.io.err, "error: {}", match f { Fault::Rt(m) => m, Fault::Fatal(e) => e.msg });
+                return if code == 0 { 1 } else { code };
+            }
+        }
         code
     }
 
@@ -832,6 +853,34 @@ impl<'a, 'io> Vm<'a, 'io> {
             }
             O::Write => self.op_write(insn)?,
             O::WriteSlot => self.op_write_slot(insn)?,
+            O::Append => self.op_append(insn)?,
+            O::FileSize => {
+                let src = self.src(a_src(insn, 1))?;
+                let p = str_of(&src, "fsize path")?;
+                let path = self.env.perms.check(p, Access::Read)?;
+                let n = fsio::file_size(&path, p)?;
+                self.cur.vars.set(a_var(insn, 0), Value::Int(n as i64));
+            }
+            O::FindLoc => {
+                let from = self.int_src(a_src(insn, 3), "from")?;
+                let pat = self.src(a_src(insn, 2))?;
+                let src = self.src(a_src(insn, 1))?;
+                let p = str_of(&src, "findloc path")?;
+                let pat: &[u8] = match &pat {
+                    Value::Buf(b) => b,
+                    Value::Str(s) => s.as_bytes(),
+                    o => return Err(format!("findloc pattern must be buf or str, got {}", o.type_name()).into()),
+                };
+                if pat.is_empty() {
+                    return Err("findloc: empty pattern".into());
+                }
+                if from < 0 {
+                    return Err(format!("findloc: from must be >= 0 (got {from})").into());
+                }
+                let path = self.env.perms.check(p, Access::Read)?;
+                let r = fsio::find_in_file(&path, p, pat, from as u64, self.deadline)?;
+                self.cur.vars.set(a_var(insn, 0), Value::Int(r));
+            }
             O::Align => {
                 let n = a_u8(insn, 1) as i128;
                 if n == 0 {
@@ -1225,7 +1274,29 @@ impl<'a, 'io> Vm<'a, 'io> {
             return Err("WRITE offset must be >= 0".into());
         }
         let path = self.env.perms.check(dst, Access::Write)?;
+        self.not_staged(&path, dst)?;
         fsio::write_atomic(&path, dst, data, off as u64, self.deadline, self.mem_limit)
+    }
+
+    fn op_append(&mut self, insn: &Insn) -> R<()> {
+        let dst = self.src(a_src(insn, 1))?;
+        let data = self.src(a_src(insn, 0))?;
+        let dst = str_of(&dst, "append destination")?;
+        let data: &[u8] = match &data {
+            Value::Buf(b) => b,
+            Value::Str(s) => s.as_bytes(),
+            o => return Err(format!("append needs buf or str, got {}", o.type_name()).into()),
+        };
+        let path = self.env.perms.check(dst, Access::Write)?;
+        self.env.appends.append(&path, dst, data, self.deadline, self.mem_limit)
+    }
+
+    /// WRITE / WRITE_SLOT must not race a staged append on the same file.
+    fn not_staged(&self, path: &std::path::Path, shown: &str) -> R<()> {
+        if self.env.appends.has(path) {
+            return Err(format!("append in progress on '{shown}'").into());
+        }
+        Ok(())
     }
 
     fn op_write_slot(&mut self, insn: &Insn) -> R<()> {
@@ -1247,6 +1318,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             return Err(format!("lwrite: offset must be >= 0 and slot > 0 (off={off}, slot={slot})").into());
         }
         let path = self.env.perms.check(dst, Access::Write)?;
+        self.not_staged(&path, dst)?;
         let mut warn = None;
         fsio::write_slot(&path, dst, data, off as u64, slot as u64, mode == 1, fill, self.deadline, &mut warn)?;
         if let Some(w) = warn {
@@ -1454,6 +1526,7 @@ impl<'a, 'io> Vm<'a, 'io> {
             let env = std::mem::take(&mut self.env);
             let mut nested = Vm::script(&unit.prog, &mut *self.io, env, self.limits).with_services(svc);
             nested.base_depth = self.base_depth + self.callers.len();
+            nested.top = false;
             let code = nested.run_script();
             self.env = nested.env;
             self.env.last_exit = code;

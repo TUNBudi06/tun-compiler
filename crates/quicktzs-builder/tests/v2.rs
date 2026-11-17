@@ -500,3 +500,26 @@ fn spec04_full_unpacker_example() {
     assert!(r.out.contains("ok, 5 byte"), "{:?}", r.out);
     assert_eq!(fs::read(data.join("out/result.bin")).unwrap(), b"hello");
 }
+
+// Regression: a script RUN from main.tun is not the outermost VM; its appends must still be
+// committed when the launcher ends normally, and discarded when the script fails.
+#[test]
+fn append_from_launcher_commits_or_discards() {
+    let a = new_id("ap-launch");
+    let d = tmp("ap-launch");
+    let data = tmp("ap-launch-data");
+    let out = data.join("out.txt");
+    let mk = |tail: &str| {
+        put(&d, "main.tun", r#"MAIN { run "scripts/main"; }"#);
+        put(&d, "scripts/main.tzst", &format!(
+            "NEED write \"{0}\";\nstart {{ append \"one,\" -> \"{1}\"; append \"two\" -> \"{1}\"; {tail} }}\n",
+            data.display(), out.display()));
+        pack_module(&d, &opts(&a, true, true)).unwrap()
+    };
+    let r = run(&mk("let @x = [1][5];"), &release(trust(&a, true)), "");
+    assert!(!r.ok(), "{:?}", r.res);
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0, "nothing written, no temp left");
+    let r = run(&mk(""), &release(trust(&a, true)), "");
+    assert!(r.ok(), "{:?} {}", r.res, r.err);
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "one,two");
+}

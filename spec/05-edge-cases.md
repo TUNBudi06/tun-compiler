@@ -105,3 +105,32 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | `mode` operand not 0/1 | runtime "bad operand" error |
 | timeout / error mid-copy | temp file removed, original intact |
 | very large file (e.g. 64MB, `NEED mem 16mb`) | succeeds: memory is O(chunk + n), file is never loaded |
+
+## fsize / findloc / append (FILE_SIZE, FINDLOC, APPEND)
+
+| Case | Behavior |
+|---|---|
+| `fsize` of a missing path | runtime error `fsize: '<path>' not found` (never -1) |
+| `fsize` of a directory | runtime error `fsize: '<path>' is a directory` |
+| `fsize` of an empty file | 0 |
+| `fsize` / `findloc` path outside any NEED read root | exit 126, same as `read` |
+| `findloc` empty pattern | runtime error |
+| `findloc` from < 0 | runtime error |
+| `findloc` from >= file size | -1 |
+| `findloc` no match | -1 |
+| `findloc` match straddling a 64 KiB chunk boundary | found, absolute offset |
+| `findloc` match at the last byte of the file | found |
+| `findloc` pattern longer than a chunk | found (memory O(chunk + pat)) |
+| `findloc` omitted `from` | same as `from` = 0 |
+| `append` x3 then normal end | target = old content + all 3 chunks |
+| `append` to a missing file | file is created at commit (not before) |
+| `append` then `exit N` (any N) / `halt` | committed |
+| `append` in the program and in an `on exit` handler | both committed, after the handler |
+| `append` then runtime error | target untouched (or not created), no temp left |
+| `append` then timeout | target untouched, no temp left |
+| `append` then SIGINT/SIGTERM/SIGHUP or panic | temps removed, targets untouched |
+| `append` path outside any NEED write root | exit 126, same as `write` |
+| `append` total (existing + appended) over the memory limit | runtime error `out of memory`, nothing committed |
+| 65th distinct staged path | runtime error `append: too many files in flight (max 64)` |
+| `write` / `lwrite` to a path with a staged append | runtime error `append in progress on '<path>'` |
+| `read` / `fsize` / `findloc` of a path with a staged append | see the old file (until commit) |

@@ -118,6 +118,15 @@ Operand notation:
                    (lwrite: replace the slot bytes at off of file dst with buf, padded with fill;
                     mode 0 = patch (cut if longer), 1 = extend (shift the tail); other mode = runtime
                     "bad operand"; same NEED write gate as WRITE; atomic + streaming)
+0x0079  FILE_SIZE  @v <path>              (fsize: size in bytes; NEED read gate; missing path or a
+                                           directory = runtime error, never -1)
+0x007A  FINDLOC    @v <path> <pat> <from> (findloc: absolute offset of the first pat (buf/str) at or
+                                           after from, else -1; NEED read gate; streamed in 64 KiB
+                                           chunks with len(pat)-1 overlap; the compiler emits a
+                                           constant 0 when `from` is omitted)
+0x007B  APPEND     <buf> <dst>            (append: stage buf at the end of file dst in a temp file;
+                                           committed when the program ends, discarded on error;
+                                           NEED write gate; no dest var)
 0x006D  ALIGN      @v <n:1B>              (advance read position to multiple of n)
 0x00AE  PADDING    @v <n:1B> <byte:1B>    (append byte until len % n == 0)
 0x00AF  HEX_RANGE  @v <off> <len>         (hex of a buffer slice, for print/debug)

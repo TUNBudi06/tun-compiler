@@ -94,6 +94,8 @@ pub enum Pre {
     Keys,
     Values,
     Find,
+    FileSize,
+    FindLoc,
     Glob,
     Select,
     SelectMulti,
@@ -121,6 +123,8 @@ impl Pre {
             "keys" => (Keys, 1),
             "values" => (Values, 1),
             "find" => (Find, 2),
+            "fsize" => (FileSize, 1),
+            "findloc" => (FindLoc, 2), // optional 3rd operand `from` (default 0) added by the parser
             "glob" => (Glob, 2),
             "select" => (Select, 2),
             "select_multi" => (SelectMulti, 2),
@@ -176,6 +180,8 @@ pub enum SK {
     Write(Expr, Expr, Expr),
     /// buf, path, off, slot, extend?, fill
     LWrite(Expr, Expr, Expr, Expr, bool, Option<Expr>),
+    /// buf, path
+    Append(Expr, Expr),
     Input(String, String),
     Print(Expr),
     Exit(u8, String),
@@ -515,6 +521,11 @@ impl P<'_> {
                         let d = self.operand()?;
                         SK::Write(b, d, self.operand()?)
                     }
+                    "append" => {
+                        let b = self.operand()?;
+                        self.expect("->")?;
+                        SK::Append(b, self.operand()?)
+                    }
                     "lwrite" => {
                         let b = self.operand()?;
                         self.expect("->")?;
@@ -834,6 +845,13 @@ impl P<'_> {
                     let mut args = vec![];
                     for _ in 0..n {
                         args.push(self.operand()?);
+                    }
+                    if pre == Pre::FindLoc {
+                        let more = matches!(
+                            self.peek().map(|t| &t.tok),
+                            Some(Tok::UserVar(_) | Tok::Int(_) | Tok::Size(_) | Tok::Str(_) | Tok::FStr(_) | Tok::Builtin(_))
+                        );
+                        args.push(if more { self.operand()? } else { Expr { k: EK::Int(0), pos } });
                     }
                     EK::Prefix(pre, args)
                 } else if self.eat("(") {

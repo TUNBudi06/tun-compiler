@@ -262,6 +262,159 @@ pub fn write_slot(
     res
 }
 
+/// `fsize`: size of a regular file; missing path or a directory is an error (never -1).
+pub fn file_size(p: &Path, shown: &str) -> Result<u64, String> {
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_dir() => Err(format!("fsize: '{shown}' is a directory")),
+        Ok(m) => Ok(m.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!("fsize: '{shown}' not found")),
+        Err(e) => Err(format!("fsize: cannot stat '{shown}': {e}")),
+    }
+}
+
+/// `findloc`: absolute offset of the first `pat` at or after `from`, else -1. Streams CHUNK bytes at
+/// a time and keeps `len(pat)-1` bytes of overlap, so memory is O(CHUNK + pat) and matches that
+/// straddle a chunk boundary are found.
+pub fn find_in_file(p: &Path, shown: &str, pat: &[u8], from: u64, deadline: Instant) -> R<i64> {
+    let io = |e: std::io::Error| format!("cannot read '{shown}': {e}");
+    let mut f = std::fs::File::open(p).map_err(io)?;
+    let meta = f.metadata().map_err(io)?;
+    if meta.is_dir() {
+        return Err(format!("findloc: '{shown}' is a directory").into());
+    }
+    if from >= meta.len() {
+        return Ok(-1);
+    }
+    f.seek(SeekFrom::Start(from)).map_err(io)?;
+    let keep_max = pat.len() - 1;
+    let mut buf = vec![0u8; CHUNK + keep_max];
+    let (mut carry, mut base) = (0usize, from); // base = absolute offset of buf[0]
+    loop {
+        if Instant::now() >= deadline {
+            return Err(timeout());
+        }
+        let n = f.read(&mut buf[carry..carry + CHUNK]).map_err(io)?;
+        if n == 0 {
+            return Ok(-1);
+        }
+        let total = carry + n;
+        let i = super::ops::find_bytes(&buf[..total], pat);
+        if i >= 0 {
+            return Ok(base as i64 + i);
+        }
+        let keep = keep_max.min(total);
+        buf.copy_within(total - keep..total, 0);
+        base += (total - keep) as u64;
+        carry = keep;
+    }
+}
+
+/// One `append` target: all appended data goes to `file` (a temp next to the target, pre-filled with
+/// the target's current content); `commit` renames it over the target. Dropping removes the temp.
+struct Staged {
+    path: PathBuf,
+    tmp: PathBuf,
+    file: std::fs::File,
+    perm: Option<std::fs::Permissions>,
+    size: u64,
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.tmp);
+        crate::sandbox::untrack_tmp(&self.tmp);
+    }
+}
+
+/// Per-program table of staged appends (shared by RUN'd scripts through `Env`). Dropped without
+/// `commit` (error, timeout, panic unwinding) it deletes every temp and leaves the targets alone.
+#[derive(Default)]
+pub struct Appends(Vec<Staged>);
+
+pub const MAX_STAGED: usize = 64;
+
+impl Appends {
+    pub fn has(&self, p: &Path) -> bool {
+        self.0.iter().any(|s| s.path == p)
+    }
+
+    /// `limit` caps the size of the final file (checked on the total, before any data is copied).
+    pub fn append(&mut self, p: &Path, shown: &str, data: &[u8], deadline: Instant, limit: u64) -> R<()> {
+        let io = |e: std::io::Error| format!("cannot write '{shown}': {e}");
+        let i = match self.0.iter().position(|s| s.path == p) {
+            Some(i) => i,
+            None => {
+                if self.0.len() >= MAX_STAGED {
+                    return Err(format!("append: too many files in flight (max {MAX_STAGED})").into());
+                }
+                let meta = match std::fs::metadata(p) {
+                    Ok(m) if m.is_dir() => return Err(format!("cannot write '{shown}': is a directory").into()),
+                    Ok(m) => Some(m),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(io(e).into()),
+                };
+                let old = meta.as_ref().map_or(0, |m| m.len());
+                if old.saturating_add(data.len() as u64) > limit {
+                    return Err("out of memory".into());
+                }
+                let name = p.file_name().ok_or_else(|| format!("cannot write '{shown}': no file name"))?.to_string_lossy();
+                let tmp = p.with_file_name(format!(".{name}.quicktzs-tmp-{}-{}", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777))
+                    .open(&tmp)
+                    .map_err(io)?;
+                crate::sandbox::track_tmp(&tmp);
+                // from here Drop of `st` removes the temp on any error
+                let mut st = Staged { path: p.to_path_buf(), tmp, file, perm: meta.map(|m| m.permissions()), size: 0 };
+                if old > 0 {
+                    let mut src = std::fs::File::open(p).map_err(io)?;
+                    let mut buf = vec![0u8; CHUNK];
+                    loop {
+                        if Instant::now() >= deadline {
+                            return Err(timeout());
+                        }
+                        let n = src.read(&mut buf).map_err(io)?;
+                        if n == 0 {
+                            break;
+                        }
+                        st.file.write_all(&buf[..n]).map_err(io)?;
+                        st.size += n as u64;
+                    }
+                }
+                self.0.push(st);
+                self.0.len() - 1
+            }
+        };
+        let s = &mut self.0[i];
+        if s.size.saturating_add(data.len() as u64) > limit {
+            return Err("out of memory".into());
+        }
+        for c in data.chunks(CHUNK) {
+            if Instant::now() >= deadline {
+                return Err(timeout());
+            }
+            s.file.write_all(c).map_err(io)?;
+        }
+        s.size += data.len() as u64;
+        Ok(())
+    }
+
+    /// fsync + rename every staged temp over its target. On the first failure the rest are discarded.
+    pub fn commit(&mut self) -> R<()> {
+        for s in std::mem::take(&mut self.0) {
+            let io = |e: std::io::Error| format!("cannot write '{}': {e}", s.path.display());
+            s.file.sync_all().map_err(io)?;
+            if let Some(m) = &s.perm {
+                let _ = s.file.set_permissions(m.clone()); // undo umask narrowing
+            }
+            std::fs::rename(&s.tmp, &s.path).map_err(io)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

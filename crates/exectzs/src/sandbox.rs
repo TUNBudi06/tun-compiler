@@ -10,6 +10,23 @@ use std::sync::Mutex;
 /// Live temp dirs and child pids, so the signal watcher can clean up (Drop does not run on signals).
 static DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Staged `append` temp files: removed on signal / panic (Drop does not run there).
+static TMPS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub fn track_tmp(p: &Path) {
+    if let Ok(mut t) = TMPS.lock() {
+        t.push(p.to_path_buf());
+    }
+}
+pub fn untrack_tmp(p: &Path) {
+    if let Ok(mut t) = TMPS.lock() {
+        t.retain(|x| x != p);
+    }
+}
+fn remove_tracked_tmps() {
+    for f in TMPS.lock().map(|t| t.clone()).unwrap_or_default() {
+        let _ = std::fs::remove_file(f);
+    }
+}
 static SIG_PIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn on_signal(sig: libc::c_int) {
@@ -22,6 +39,12 @@ extern "C" fn on_signal(sig: libc::c_int) {
 // SPEC-GAP: ON_EXIT is not run on signals; it executes on the VM thread that is mid-instruction
 // (or blocked in wait), so running it from the watcher would need a cancellation hook in the VM.
 pub fn install_signal_cleanup() {
+    // release builds use panic=abort: the hook still runs before the abort
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |i| {
+        remove_tracked_tmps();
+        prev(i)
+    }));
     let mut fds = [0; 2];
     // O_CLOEXEC: RUN/LOAD_SRV children must not inherit the write end (a stray byte would kill us).
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -38,6 +61,7 @@ pub fn install_signal_cleanup() {
         for pid in PIDS.lock().map(|p| p.clone()).unwrap_or_default() {
             kill_group(pid);
         }
+        remove_tracked_tmps();
         for d in DIRS.lock().map(|d| d.clone()).unwrap_or_default() {
             let _ = std::fs::remove_dir_all(d);
         }

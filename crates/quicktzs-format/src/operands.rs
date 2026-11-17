@@ -58,6 +58,9 @@
 //! | FIND | @v buf pat | @v = byte offset of pat (buf or str) in buf, or -1 |
 //! | WRITE | buf dst off | write buf (buf or str) to file path `dst` at byte offset `off`; atomic (temp+rename); path must be inside a NEED write root |
 //! | WRITE_SLOT | buf dst off slot mode:1B fill:1B | `lwrite`: replace the `slot` bytes at `off` of file `dst` with buf, padded with `fill` (mode 0 patch: cut if longer; mode 1 extend: shift the tail); atomic + streaming; NEED write root required |
+//! | FILE_SIZE | @v path | `fsize`: @v = size in bytes of file `path`; NEED read gate; missing/dir → runtime error |
+//! | FINDLOC | @v path pat from | `findloc`: @v = absolute offset of first `pat` in file `path` at or after `from`, or -1; streamed; NEED read gate |
+//! | APPEND | buf dst | `append`: stage buf at the end of file `dst` in a temp file; committed when the program ends, discarded on error; NEED write gate |
 //! | ALIGN | @v n:1B | @v (int) rounded up to a multiple of n; n == 0 → runtime error |
 //! | PADDING | @v n:1B byte:1B | append `byte` to buf @v until len % n == 0 |
 //! | HEX_RANGE | @v off len | push hex string of buf slice |
@@ -200,6 +203,9 @@ pub fn operands(op: Opcode) -> &'static [Kind] {
         O::Find => &[Var, Src, Src],
         O::Write => &[Src, Src, Src],
         O::WriteSlot => &[Src, Src, Src, Src, U8, U8],
+        O::FileSize => &[Var, Src],
+        O::FindLoc => &[Var, Src, Src, Src],
+        O::Append => &[Src, Src],
         O::Align => &[Var, U8],
         O::Padding => &[Var, U8, U8],
         O::HexRange | O::Slice => &[Var, Src, Src],

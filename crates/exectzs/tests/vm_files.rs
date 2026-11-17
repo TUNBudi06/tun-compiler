@@ -453,3 +453,292 @@ fn lwrite_streams_large_file_under_low_mem_limit() {
     assert_eq!(&b[..2], [0xAB, 0]);
     only_f(&d);
 }
+
+// ---------------- fsize / findloc / append ----------------
+
+enum Tail {
+    Halt,
+    Exit(u8),
+    /// runtime error (READU8 out of bounds)
+    Fail,
+}
+
+/// Script: append each chunk to `path`, then end as `tail`. Returns the run output.
+fn ap(need: &[(u8, String)], o: &RunOptions, path: &str, chunks: &[&str], tail: Tail) -> Out {
+    let mut a = Asm::new();
+    for (k, d) in need {
+        a.need(*k, d);
+    }
+    a.let_(1, S(Box::leak(path.to_string().into_boxed_str())));
+    for (i, c) in chunks.iter().enumerate() {
+        let v = 10 + i as u8;
+        a.buf(v, c);
+        a.op(O::Append, &[sv(v), sv(1)]);
+    }
+    match tail {
+        Tail::Halt => {}
+        Tail::Exit(n) => {
+            let k = a.k_s("bye");
+            a.op(O::Exit, &[u(n), cr(k)]);
+        }
+        Tail::Fail => {
+            let k = a.k_i(99);
+            a.op(O::ReadU8, &[va(2), sv(10), sk(k)]);
+        }
+    }
+    a.halt();
+    run_with(&a.build(), o, "")
+}
+
+#[test]
+fn append_three_chunks_commit_at_end() {
+    let (d, need, path) = lw_setup("ap_ok", b"AB");
+    let r = ap(&need, &opts(), &path, &["12", "34", "56"], Tail::Halt);
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(rd(&d), b"AB123456");
+    only_f(&d);
+}
+
+#[test]
+fn append_creates_missing_file_and_keeps_mode() {
+    let d = tmpdir("ap_new");
+    let need = [(WRITE_DIR, d.to_string_lossy().into_owned())];
+    assert_eq!(ap(&need, &opts(), &p(&d, "f.bin"), &["x", "y"], Tail::Halt).code(), 0);
+    assert_eq!(rd(&d), b"xy");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(d.join("f.bin"), std::fs::Permissions::from_mode(0o640)).unwrap();
+    assert_eq!(ap(&need, &opts(), &p(&d, "f.bin"), &["z"], Tail::Halt).code(), 0);
+    assert_eq!(rd(&d), b"xyz");
+    assert_eq!(std::fs::metadata(d.join("f.bin")).unwrap().permissions().mode() & 0o7777, 0o640);
+    only_f(&d);
+}
+
+#[test]
+fn append_commits_on_explicit_exit_any_code() {
+    for n in [0u8, 3] {
+        let (d, need, path) = lw_setup(&format!("ap_exit{n}"), b"A");
+        let r = ap(&need, &opts(), &path, &["b"], Tail::Exit(n));
+        assert_eq!(r.code(), n as i32, "{}", r.err);
+        assert_eq!(rd(&d), b"Ab");
+        only_f(&d);
+    }
+}
+
+#[test]
+fn append_runtime_error_discards_and_leaves_no_temp() {
+    let (d, need, path) = lw_setup("ap_err", b"keep");
+    let r = ap(&need, &opts(), &path, &["12", "34"], Tail::Fail);
+    assert_eq!(r.code(), 1, "{}", r.err);
+    assert_eq!(rd(&d), b"keep");
+    only_f(&d);
+    // a new file is not created either
+    let r = ap(&need, &opts(), &p(&d, "new.bin"), &["x"], Tail::Fail);
+    assert_eq!(r.code(), 1);
+    only_f(&d);
+}
+
+#[test]
+fn append_timeout_discards() {
+    let (d, need, path) = lw_setup("ap_to", b"keep");
+    let o = RunOptions { timeout_ms: Some(0), ..opts() };
+    let r = ap(&need, &o, &path, &["12"], Tail::Halt);
+    assert_ne!(r.code(), 0);
+    assert_eq!(rd(&d), b"keep");
+    only_f(&d);
+}
+
+#[test]
+fn append_denied_outside_need_and_with_read_root() {
+    let (d, _, path) = lw_setup("ap_deny", b"keep");
+    denied(&ap(&[(READ_DIR, d.to_string_lossy().into_owned())], &opts(), &path, &["x"], Tail::Halt));
+    denied(&ap(&[], &opts(), &path, &["x"], Tail::Halt));
+    assert_eq!(rd(&d), b"keep");
+    only_f(&d);
+}
+
+#[test]
+fn append_size_limit_checked_on_total() {
+    let (d, need, path) = lw_setup("ap_lim", &vec![0u8; 100]);
+    let o = RunOptions { mem_limit: Some(150), ..opts() };
+    // 100 existing + 30 + 30 > 150 on the second chunk: error, nothing committed
+    let r = ap(&need, &o, &path, &["012345678901234567890123456789", "012345678901234567890123456789"], Tail::Halt);
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("out of memory"), "{}", r.err);
+    assert_eq!(std::fs::metadata(d.join("f.bin")).unwrap().len(), 100);
+    only_f(&d);
+}
+
+#[test]
+fn append_then_write_same_path_is_an_error() {
+    let (d, need, path) = lw_setup("ap_ww", b"keep");
+    for slot in [false, true] {
+        let mut a = Asm::new();
+        a.need(WRITE_DIR, &d.to_string_lossy());
+        a.let_(1, S(Box::leak(path.clone().into_boxed_str())));
+        a.buf(0, "ab");
+        a.op(O::Append, &[sv(0), sv(1)]);
+        let (k0, k2) = (a.k_i(0), a.k_i(2));
+        if slot {
+            a.op(O::WriteSlot, &[sv(0), sv(1), sk(k0), sk(k2), u(0), u(0)]);
+        } else {
+            a.op(O::Write, &[sv(0), sv(1), sk(k0)]);
+        }
+        a.halt();
+        let r = run(&a.build());
+        assert_eq!(r.code(), 1);
+        assert!(r.err.contains("append in progress on"), "{}", r.err);
+        assert_eq!(rd(&d), b"keep");
+        only_f(&d);
+    }
+    let _ = need;
+}
+
+#[test]
+fn append_reads_see_old_file_until_commit() {
+    let (d, _, path) = lw_setup("ap_old", b"12345");
+    let mut a = Asm::new();
+    a.need(WRITE_DIR, &d.to_string_lossy());
+    a.need(READ_DIR, &d.to_string_lossy());
+    a.let_(1, S(Box::leak(path.clone().into_boxed_str())));
+    a.buf(0, "abc");
+    a.op(O::Append, &[sv(0), sv(1)]);
+    a.op(O::FileSize, &[va(2), sv(1)]).print_v(2);
+    a.halt();
+    let r = run(&a.build());
+    assert_eq!((r.out.as_str(), r.code()), ("5\n", 0), "{}", r.err);
+    assert_eq!(rd(&d), b"12345abc");
+}
+
+#[test]
+fn append_more_than_64_paths_is_an_error_and_discards() {
+    let d = tmpdir("ap_64");
+    let mut a = Asm::new();
+    a.need(WRITE_DIR, &d.to_string_lossy());
+    a.buf(0, "x");
+    for i in 0..65 {
+        a.let_(1, S(Box::leak(p(&d, &format!("f{i}")).into_boxed_str())));
+        a.op(O::Append, &[sv(0), sv(1)]);
+    }
+    a.halt();
+    let r = run(&a.build());
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("too many files in flight"), "{}", r.err);
+    assert!(entries(&d).is_empty(), "{:?}", entries(&d));
+}
+
+#[test]
+fn append_commits_after_on_exit_and_runs_nested_script_appends() {
+    let (d, need, path) = lw_setup("ap_onexit", b"A");
+    let mut a = Asm::new();
+    for (k, x) in &need {
+        a.need(*k, x);
+    }
+    a.let_(1, S(Box::leak(path.clone().into_boxed_str())));
+    a.buf(0, "b");
+    a.buf(2, "c");
+    a.op(O::OnExit, &[lbl("h")]).op(O::Jmp, &[lbl("m")]);
+    a.label("h").op(O::Append, &[sv(2), sv(1)]).halt();
+    a.label("m").op(O::Append, &[sv(0), sv(1)]);
+    let k = a.k_s("bye");
+    a.op(O::Exit, &[u(0), cr(k)]);
+    a.halt();
+    let r = run(&a.build());
+    assert_eq!(r.code(), 0, "{}", r.err);
+    assert_eq!(rd(&d), b"Abc");
+    only_f(&d);
+}
+
+fn fs_prog(need: &[(u8, String)], path: &str, body: impl FnOnce(&mut Asm)) -> Out {
+    let mut a = Asm::new();
+    for (k, d) in need {
+        a.need(*k, d);
+    }
+    a.let_(1, S(Box::leak(path.to_string().into_boxed_str())));
+    body(&mut a);
+    a.halt();
+    run(&a.build())
+}
+
+#[test]
+fn fsize_returns_size_and_errors_on_missing_dir_denied() {
+    let (d, _, path) = lw_setup("fsize", b"0123456789");
+    let need = [(READ_DIR, d.to_string_lossy().into_owned())];
+    let r = fs_prog(&need, &path, |a| {
+        a.op(O::FileSize, &[va(2), sv(1)]).print_v(2);
+    });
+    assert_eq!((r.out.as_str(), r.code()), ("10\n", 0), "{}", r.err);
+    let r = fs_prog(&need, &p(&d, "nope"), |a| {
+        a.op(O::FileSize, &[va(2), sv(1)]).print_v(2);
+    });
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("fsize: '") && r.err.contains("nope' not found"), "{}", r.err);
+    let r = fs_prog(&need, &d.to_string_lossy(), |a| {
+        a.op(O::FileSize, &[va(2), sv(1)]).print_v(2);
+    });
+    assert_eq!(r.code(), 1);
+    assert!(r.err.contains("is a directory"), "{}", r.err);
+    let r = fs_prog(&[], &path, |a| {
+        a.op(O::FileSize, &[va(2), sv(1)]);
+    });
+    denied(&r);
+    // empty file is 0, not an error
+    std::fs::write(d.join("e"), b"").unwrap();
+    let r = fs_prog(&need, &p(&d, "e"), |a| {
+        a.op(O::FileSize, &[va(2), sv(1)]).print_v(2);
+    });
+    assert_eq!(r.out, "0\n");
+}
+
+/// FINDLOC on `path` for `pat` from `from`; prints the result.
+fn fl(need: &[(u8, String)], path: &str, pat: &str, from: i64) -> Out {
+    fs_prog(need, path, |a| {
+        a.buf(0, pat);
+        let k = a.k_i(from);
+        a.op(O::FindLoc, &[va(2), sv(1), sv(0), sk(k)]).print_v(2);
+    })
+}
+
+#[test]
+fn findloc_basic_from_and_not_found() {
+    let (d, _, path) = lw_setup("fl_basic", b"abcabcabc");
+    let need = [(READ_DIR, d.to_string_lossy().into_owned())];
+    for (pat, from, want) in [("abc", 0, "0\n"), ("abc", 1, "3\n"), ("cab", 0, "2\n"), ("zzz", 0, "-1\n"), ("abc", 9, "-1\n"), ("abc", 100, "-1\n"), ("c", 8, "8\n")] {
+        let r = fl(&need, &path, pat, from);
+        assert_eq!((r.out.as_str(), r.code()), (want, 0), "{pat} {from}: {}", r.err);
+    }
+}
+
+#[test]
+fn findloc_errors_empty_pat_negative_from_missing_denied() {
+    let (d, _, path) = lw_setup("fl_err", b"abc");
+    let need = [(READ_DIR, d.to_string_lossy().into_owned())];
+    assert_eq!(fl(&need, &path, "", 0).code(), 1);
+    assert_eq!(fl(&need, &path, "a", -1).code(), 1);
+    assert_eq!(fl(&need, &p(&d, "nope"), "a", 0).code(), 1);
+    denied(&fl(&[], &path, "a", 0));
+}
+
+#[test]
+fn findloc_match_straddling_chunk_boundary_and_last_byte() {
+    let d = tmpdir("fl_chunk");
+    const C: usize = 64 * 1024;
+    let mut data = vec![b'.'; 3 * C + 10];
+    data[C - 2..C + 2].copy_from_slice(b"WXYZ"); // straddles the first chunk boundary
+    data[2 * C - 1..2 * C + 4].copy_from_slice(b"12345"); // straddles the second
+    let last = data.len() - 1;
+    data[last] = b'Q'; // very last byte
+    std::fs::write(d.join("f.bin"), &data).unwrap();
+    let need = [(READ_DIR, d.to_string_lossy().into_owned())];
+    let path = p(&d, "f.bin");
+    assert_eq!(fl(&need, &path, "WXYZ", 0).out, format!("{}\n", C - 2));
+    assert_eq!(fl(&need, &path, "12345", 0).out, format!("{}\n", 2 * C - 1));
+    assert_eq!(fl(&need, &path, "Q", 0).out, format!("{last}\n"));
+    // `from` inside the file, past the first hit
+    assert_eq!(fl(&need, &path, "WXYZ", (C - 1) as i64).out, "-1\n");
+    // pattern longer than a chunk, ending at EOF
+    let big = "ab".repeat(C);
+    let mut data = vec![b'.'; 5];
+    data.extend_from_slice(big.as_bytes());
+    std::fs::write(d.join("g.bin"), &data).unwrap();
+    assert_eq!(fl(&need, &p(&d, "g.bin"), &big, 0).out, "5\n");
+}

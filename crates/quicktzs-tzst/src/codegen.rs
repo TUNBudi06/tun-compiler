@@ -442,7 +442,7 @@ impl Gen {
     fn is_dest_op(p: Pre) -> bool {
         matches!(
             p,
-            Pre::ReadU8 | Pre::ReadU16 | Pre::ReadU32 | Pre::ReadU64 | Pre::ReadStr | Pre::Read | Pre::Find | Pre::Glob | Pre::Select | Pre::SelectMulti
+            Pre::ReadU8 | Pre::ReadU16 | Pre::ReadU32 | Pre::ReadU64 | Pre::ReadStr | Pre::Read | Pre::Find | Pre::FileSize | Pre::FindLoc | Pre::Glob | Pre::Select | Pre::SelectMulti
         )
     }
 
@@ -464,6 +464,8 @@ impl Gen {
             Pre::ReadStr => O::ReadStr,
             Pre::Read => O::Read,
             Pre::Find => O::Find,
+            Pre::FileSize => O::FileSize,
+            Pre::FindLoc => O::FindLoc,
             Pre::Glob => O::Glob,
             Pre::Select | Pre::SelectMulti => {
                 let EK::Str(s) = &a[1].k else { return Err(self.err("select prompt must be a string literal")) };
@@ -707,6 +709,10 @@ impl Gen {
             SK::Write(b, d, o) => {
                 let (b, d, o) = (self.src(b)?, self.src(d)?, self.src(o)?);
                 self.ins(O::Write, &[Arg::Src(b), Arg::Src(d), Arg::Src(o)])
+            }
+            SK::Append(b, d) => {
+                let (b, d) = (self.src(b)?, self.src(d)?);
+                self.ins(O::Append, &[Arg::Src(b), Arg::Src(d)])
             }
             SK::LWrite(b, d, o, s, ext, fill) => {
                 let (b, d, o, s) = (self.src(b)?, self.src(d)?, self.src(o)?, self.src(s)?);

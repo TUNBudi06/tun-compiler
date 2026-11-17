@@ -498,3 +498,31 @@ fn lwrite_compiles_and_disassembles() {
     assert!(c("start { let @b = \"x\"; lwrite @b -> \"/f\" 0 1 fill @b; }").is_err());
     assert!(c("start { let @b = \"x\"; lwrite @b -> \"/f\" 0 1 }").is_err());
 }
+
+#[test]
+fn fsize_findloc_append_exact_bytes() {
+    // vars are allocated in order of first definition: f=0 zmagic=1 pos=2 (before the dests)
+    let o = ok("NEED read \"/d\";\nNEED write \"/d\";\nstart {\n let @f = \"/d/x\";\n let @zmagic = \"Z\";\n let @pos = 4;\n let @n = fsize @f;\n let @o = findloc @f @zmagic @pos;\n let @q = findloc @f @zmagic;\n let @b = \"hi\";\n append @b -> @f;\n}");
+    let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
+    let code = &o.file.tun.code;
+    let bytes = |op: O| -> Vec<u8> {
+        let i = ins.iter().position(|i| i.op == op).unwrap();
+        let end = ins.get(i + 1).map_or(code.len(), |n| n.at);
+        code[ins[i].at..end].to_vec()
+    };
+    // f=@0 zmagic=@1 pos=@2 n=@3 o=@4 q=@5 b=@6
+    assert_eq!(bytes(O::FileSize), [0x00, 0x79, 0x03, 0x00, 0x00]);
+    assert_eq!(bytes(O::Append), [0x00, 0x7B, 0x00, 0x06, 0x00, 0x00]);
+    let fl: Vec<_> = ins.iter().filter(|i| i.op == O::FindLoc).collect();
+    assert_eq!(fl.len(), 2);
+    assert_eq!(&code[fl[0].at..fl[0].at + 9], [0x00, 0x7A, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02]);
+    // omitted `from` is a constant-0 operand
+    assert_eq!(fl[1].args[3], Arg::Src(Src::Const(ci(&o, Const::Int(0)))));
+    let d = disassemble(code, &o.file.tun.consts, Width::W4).unwrap();
+    assert!(d.contains("FILE_SIZE") && d.contains("FINDLOC") && d.contains("APPEND"), "{d}");
+    sane(&o, Width::W4);
+    // syntax errors
+    assert!(c("start { let @b = \"x\"; append @b \"/f\"; }").is_err());
+    assert!(c("start { let @b = \"x\"; append @b -> \"/f\" }").is_err());
+    assert!(c("start { let @n = fsize; }").is_err());
+}
