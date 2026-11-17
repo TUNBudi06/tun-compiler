@@ -1,5 +1,5 @@
 //! `.tzst` compiler tests: golden bytes (spec/07), structural sanity of every form, static checks.
-use crate::{compile_tzst, compile_tzst_opt, disassemble, CompileError, TzstOutput};
+use crate::{compile_tzst, disassemble, CompileError, TzstOutput};
 use quicktzs_format::dict::Perm;
 use quicktzs_format::opcodes::Opcode as O;
 use quicktzs_format::operands::{decode_all, loop_regions, Arg, Src};
@@ -7,9 +7,8 @@ use quicktzs_format::tun::Const;
 use quicktzs_format::tzst::TzstFile;
 use quicktzs_format::types::{PermKind, Width};
 
-/// Unoptimized (`opt = false`): the spec/07 plain push/push/OP/STORE form these golden tests pin.
 fn c(src: &str) -> Result<TzstOutput, CompileError> {
-    compile_tzst_opt(src, Width::W4, &|p| Err(format!("cannot resolve '{p}' without a module (use the builder)")), false)
+    crate::compile_tzst_with(src, Width::W4, &|p| Err(format!("cannot resolve '{p}' without a module (use the builder)")))
 }
 fn ok(src: &str) -> TzstOutput {
     c(src).unwrap_or_else(|e| panic!("{e}\n--- source:\n{src}"))
@@ -50,10 +49,7 @@ fn spec07_simple_bytes() {
     assert_eq!(o.file.tun.consts, vec![Const::Int(3), Const::Int(1), Const::Str("ok".into())]);
     let want: Vec<u8> = [
         &[0x00, 0x30, 0x00, 0x00][..],
-        &[0x00, 0x40, 0x00],
-        &[0x00, 0x41, 0x01],
-        &[0x00, 0x42],
-        &[0x00, 0x50, 22, 0, 0, 0],
+        &[0x00, 0xDE, 0x00, 0x00, 0x81, 17, 0, 0, 0], // JFGT @0 #1 -> HALT
         &[0x00, 0x60, 0x01, 0x82],
         &[0x00, 0x03],
     ]
@@ -191,13 +187,13 @@ start { let @r = add(1, 2); let (@p, @q) = pair(@r); early(1); print f\"{add(@p,
 
 #[test]
 fn jump_targets_and_shapes() {
-    // while layout: head: cond; WHILE exit; body; JMP head; exit:
+    // while layout: head: JF<cc> a b exit; body; JMP head; exit:
     let o = ok("start { let @t = 3; while @t > 0 { @t = @t - 1; } }");
     let ins = decode_all(&o.file.tun.code, Width::W4).unwrap();
-    let w = ins.iter().position(|i| i.op == O::While).unwrap();
-    let Arg::Addr(exit) = ins[w].args[0] else { panic!() };
-    assert_eq!(ins[w + 5].op, O::Jmp);
-    assert_eq!(ins[w + 5].next, exit as usize);
+    let w = ins.iter().position(|i| i.op == O::JfGt).unwrap();
+    let Arg::Addr(exit) = ins[w].args[2] else { panic!() };
+    assert_eq!((ins[w + 1].op, ins[w + 2].op), (O::Sub3, O::Jmp));
+    assert_eq!(ins[w + 2].next, exit as usize);
     assert_eq!(loop_regions(&ins).unwrap().len(), 1);
     // for: FOR_NEXT jumps to the first body insn
     let o = ok("start { for @i in 0..3 { print @i; } }");
@@ -601,10 +597,6 @@ fn soft_keyword_builtin_still_used_without_user_fn() {
 
 // ---- superinstructions (default on)
 
-fn code_ops(o: &TzstOutput) -> Vec<O> {
-    decode_all(&o.file.tun.code, Width::W4).unwrap().iter().map(|i| i.op).collect()
-}
-
 #[test]
 fn opt_three_address_and_fused_branch_bytes() {
     let o = compile_tzst("start { let @i = 0; while @i < 10 { let @i = @i + 1; } }", Width::W4).unwrap();
@@ -620,10 +612,6 @@ fn opt_three_address_and_fused_branch_bytes() {
     ]
     .concat();
     assert_eq!(o.file.tun.code, want);
-    // the same source unoptimized is the plain stack form
-    let p = c("start { let @i = 0; while @i < 10 { let @i = @i + 1; } }").unwrap();
-    let ops = code_ops(&p);
-    assert!(ops.contains(&O::While) && ops.contains(&O::Add) && !ops.contains(&O::JfLt));
 }
 
 #[test]

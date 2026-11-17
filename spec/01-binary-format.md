@@ -63,7 +63,7 @@ BEFORE parsing the dict or touching any entry.
 0x04  1B  version
 0x05  4B  app_id         project identity (anti pak-swap)
 0x09  4B  pak_version    content version (for distributor's own update/version checks)
-0x0D  1B  min_exec_ver   executor below this refuses, with "update executor". Builder sets 1, or 2 when any script uses a 0x00D0..=0x00DF superinstruction (spec/02); executor version is 2
+0x0D  1B  min_exec_ver   executor below this refuses, with "update executor"
 0x0E  1B  key_mode       0=none 1=local(HKDF) 2=server
 0x0F  8B  build_time     unix epoch seconds
 0x17  4B  author_id      distributor identity

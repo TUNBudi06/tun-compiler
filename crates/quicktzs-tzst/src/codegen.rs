@@ -28,8 +28,6 @@ enum Dest<'a> {
 }
 
 struct Gen {
-    /// select superinstructions (ADD3.., JF<cc>); off = plain stack form (spec/07 bytes)
-    opt: bool,
     width: Width,
     consts: Vec<Const>,
     code: Vec<u8>,
@@ -44,9 +42,8 @@ struct Gen {
     ret_jumps: Vec<usize>,
 }
 
-pub fn generate(p: &Program, width: Width, tables: &[LibTable], opt: bool) -> Res<(TzstFile, Vec<Perm>)> {
+pub fn generate(p: &Program, width: Width, tables: &[LibTable]) -> Res<(TzstFile, Vec<Perm>)> {
     let mut g = Gen {
-        opt,
         width,
         consts: vec![],
         code: vec![],
@@ -632,7 +629,7 @@ impl Gen {
                 let v = self.slot(&d)?;
                 self.lib_call_pushed(e, v)
             }
-            EK::Bin(op, a, b) if self.opt && op3(*op).is_some() => {
+            EK::Bin(op, a, b) if op3(*op).is_some() => {
                 // operands first (a before b), dest slot after: `let @x = @x + 1` with @x unset must still fail
                 let (sa, sb) = (self.src(a)?, self.src(b)?);
                 let v = self.slot(&d)?;
@@ -649,7 +646,7 @@ impl Gen {
     /// Condition of `if` / `while`: jumps to the (patched later) target when FALSE. Returns the patch
     /// site. `fallback` is JZ / WHILE. A plain comparison fuses to JF<cc> (same compare, same errors).
     fn cond(&mut self, c: &Expr, fallback: O) -> Res<usize> {
-        if let (true, EK::Bin(op, a, b)) = (self.opt, &c.k) {
+        if let EK::Bin(op, a, b) = &c.k {
             if let Some(o) = jf(*op) {
                 self.pos = c.pos;
                 let (sa, sb) = (self.src(a)?, self.src(b)?);

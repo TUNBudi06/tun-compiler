@@ -63,13 +63,7 @@ pub fn compile_tzst(src: &str, width: Width) -> Result<TzstOutput, CompileError>
 
 /// Compile `.tzst` source; `lib/` and `scripts/` imports are resolved by `resolve` (`std/` is built in).
 pub fn compile_tzst_with(src: &str, width: Width, resolve: ImportResolver) -> Result<TzstOutput, CompileError> {
-    tzst::compile(src, width, resolve, true)
-}
-
-/// Like [`compile_tzst_with`] with the superinstruction selection switched explicitly. `opt = false`
-/// emits the plain push/push/OP/STORE form (spec/07 worked examples); `true` is the default.
-pub fn compile_tzst_opt(src: &str, width: Width, resolve: ImportResolver, opt: bool) -> Result<TzstOutput, CompileError> {
-    tzst::compile(src, width, resolve, opt)
+    tzst::compile(src, width, resolve)
 }
 
 /// The export table of a compiled script (fn_id = index; ret = None), for scripts importing scripts.

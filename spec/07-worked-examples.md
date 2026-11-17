@@ -3,9 +3,6 @@
 Width = 4 unless noted. Opcodes 2 bytes. Var index 1B. Const ref varint. Jump addr 4B.
 Int in const pool = varint. These are reference encodings the assembler must reproduce.
 
-Note: the examples show UNOPTIMIZED output (plain push/push/OP/STORE and JZ/WHILE). The compiler's default
-also fuses these into the spec/02 superinstructions (ADD3.., JF<cc>); tests pin these bytes with opt off.
-
 ## main.tun
 
 Text:
@@ -62,10 +59,7 @@ Const pool: `#0 int 3`, `#1 int 1`, `#2 str "ok"`.
 Compiled CODE:
 ```
 00 30 00 00     LET @0 = const#0 (3)
-00 40 00        PUSH_VAR @0
-00 41 01        PUSH_CONST #1 (1)
-00 42           GT
-00 50 <addr>    JZ end
+00 DE 00 00 81 <addr:4B>   JFGT @0 const#1 -> end  (fused: push a; push b; GT; JZ end)
 00 60 01 80 02  PRINT parts=1: const#2
 00 03           HALT
 ```

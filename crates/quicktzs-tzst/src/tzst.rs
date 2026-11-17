@@ -17,10 +17,10 @@ fn tables(prog: &parser::Program, resolve: ImportResolver) -> Result<Vec<LibTabl
         .collect()
 }
 
-pub fn compile(src: &str, width: Width, resolve: ImportResolver, opt: bool) -> Result<TzstOutput, CompileError> {
+pub fn compile(src: &str, width: Width, resolve: ImportResolver) -> Result<TzstOutput, CompileError> {
     let prog = parser::parse(src)?;
     let t = tables(&prog, resolve)?;
     let warnings = checker::check(&prog, &t)?;
-    let (file, perms) = codegen::generate(&prog, width, &t, opt)?;
+    let (file, perms) = codegen::generate(&prog, width, &t)?;
     Ok(TzstOutput { file, perms, warnings })
 }

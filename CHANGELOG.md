@@ -6,6 +6,25 @@ existing modules build or run.
 
 ## 2026-11-18
 
+### Faster: read cache, findloc, superinstructions. CI release builds (`PENDING`)
+- **Reads:** `read_u32`, `read`, etc. keep up to 8 files open with a 64 KiB read window. A read went from
+  about 6 µs to 0.15 µs. The NEED check still runs the first time a path is read. Files are closed
+  automatically: least recently used first when a 9th opens, all at the end of the script, and all after any
+  `write`, `lwrite`, `run` or append commit, so the next read sees the new content. **Limit:** a file changed by
+  another process while the script runs may be read stale.
+- **findloc:** uses the `memchr` substring search. 1 GB scan: 299 MB/s to about 3.9 GB/s. Same results.
+- **Superinstructions** (always on; no release existed, so this is the baseline format, no version bump):
+  `ADD3 SUB3 MUL3 DIV3 MOD3 AND3 OR3 XOR3 SHL3 SHR3` (0x00D0-0x00D9, `@dst <a> <b>`) and `JFEQ JFNE JFLT JFLE JFGT
+  JFGE` (0x00DA-0x00DF, `<a> <b> <addr4>`, jump when the comparison is false). Results and error texts are the same
+  as the plain push/op/store sequence. Loops run 2-3x faster (int loop 207 to 80 ns per iteration).
+  spec/07's simple `.tzst` example now shows the fused bytes.
+- **CI:** new `release.yml` builds `quicktzs`, `exectzs` and `quicktzs-buildserver` for x86_64 and aarch64 Linux
+  (glibc). Artifacts on every push to `main`; a GitHub Release on `v*` tags.
+- **CI fixes:** the signal-pipe test closes fds the runner leaks into the test; the `NEED time` raise test has a
+  30 s budget for slow debug runners. CI had been red on GitHub for several commits because of these two tests.
+- **Compatibility:** modules built now use the new opcodes; an executor built before this change rejects them
+  (unknown opcode).
+
 ### Fixed: soft keywords, `dev run` signals, leftover folders (`52d37e3`)
 - **Soft keywords:** a script's own `fn` with the same name as a built-in (`fsize`, `findloc`,
   `append`, `write`, `lwrite`, `read`, `split`, …) wins when called with parentheses. Before,

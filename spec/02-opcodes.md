@@ -164,10 +164,9 @@ Operand notation:
 0x00C2  UNPACK     <n:1B>
 ```
 
-## Superinstructions (min_exec_ver 2)
+## Superinstructions
 
-Fused forms the .tzst compiler emits by default (an API switch turns selection off; the spec/07
-examples show that unoptimized form). Each is defined as EXACTLY the plain sequence it replaces,
+Fused forms the .tzst compiler always emits. Each is defined as EXACTLY the plain sequence it replaces,
 so results, errors and error text are identical. Both operands are a full `<src>`
 (`00 NN` var, `01 id` builtin, `80|i` / `FE varint` const, `FF` stack). With `FF` the value was
 already pushed by earlier code and is popped (b first, then a); var/const operands are read when
