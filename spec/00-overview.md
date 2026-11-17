@@ -1,12 +1,12 @@
-# TunPak — Overview
+# QuickTZS — Overview
 
-A self-contained module format (`.pak`) with its own launcher bytecode (`main.tun`),
+A self-contained module format (`.qtz`) with its own launcher bytecode (`main.tun`),
 scripting language (`.tzst`), and signed/verified executor. Think "`.jar` meets `.apk`",
 but with a tiny stack VM you own end to end.
 
 ## The three layers
 
-1. **Container (`.pak`)** — a signed archive of entries: `main.tun`, `.tzst` scripts,
+1. **Container (`.qtz`)** — a signed archive of entries: `main.tun`, `.tzst` scripts,
    native libs (`.so`), executables, and assets. Each entry may be compressed and/or
    encrypted individually.
 2. **Launcher (`main.tun`)** — compiled bytecode that runs once: verify → load → start.
@@ -25,16 +25,16 @@ language stays small forever because new heavy capability = new lib, not new opc
 
 The format only ever **adds**, never changes existing meaning. Opcodes are 2 bytes
 (65k space), refs are width-tagged (4/8), new entry types/flags use reserved slots.
-A `.pak` built on an old format still runs on a new executor. "Userspace" here means
+A `.qtz` built on an old format still runs on a new executor. "Userspace" here means
 **the distributor's modules** — their old modules keep building and running.
 
 ## Roles
 
 - **Vendor (project owner):** ships the tool to distributors, runs the build server
   (which only builds executors), handles key revocation. Does NOT read module contents.
-- **Distributor:** generates their own keypair, writes modules, builds `.pak` signed with
+- **Distributor:** generates their own keypair, writes modules, builds `.qtz` signed with
   their private key, generates an executor carrying their public key. Ships both to users.
-- **User:** receives executor + `.pak`, approves the permission manifest, runs it.
+- **User:** receives executor + `.qtz`, approves the permission manifest, runs it.
 
 ## Security philosophy
 
@@ -56,5 +56,5 @@ server and called via `RUN` / `LOAD_SRV`, never `CALL_LIB`.
 
 ## Implementation
 
-Rust, one Cargo workspace. `tunpak-format` + `tunpak-crypto` shared by builder and
+Rust, one Cargo workspace. `quicktzs-format` + `quicktzs-crypto` shared by builder and
 executor. Executor is hardened (strip, LTO, obfstr); builder is not. See `08-workspace.md`.

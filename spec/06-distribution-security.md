@@ -1,30 +1,30 @@
-# TunPak — Distribution & Security
+# QuickTZS — Distribution & Security
 
 ## Roles
 
 ```
 vendor (you)   ships the tool to distributors; runs the build server (builds EXECUTORS
                only); handles pubkey revocation. Does NOT read module contents.
-distributor    generates own keypair (random); writes modules; builds signed .pak; gets
-               an executor carrying their public key. Ships executor + .pak to users.
-user           receives executor + .pak; approves the permission manifest; runs.
+distributor    generates own keypair (random); writes modules; builds signed .qtz; gets
+               an executor carrying their public key. Ships executor + .qtz to users.
+user           receives executor + .qtz; approves the permission manifest; runs.
 ```
 
-A distributor's `.pak` only runs on that distributor's executor (pinned public key).
-Executor A rejects a `.pak` from distributor B. A distributor can build many `.pak`s, all
+A distributor's `.qtz` only runs on that distributor's executor (pinned public key).
+Executor A rejects a `.qtz` from distributor B. A distributor can build many `.qtz`s, all
 signed by their private key, all running on their executor.
 
 ## First-run flow (distributor)
 
 ```
-1. tunpak keygen        → random keypair
+1. quicktzs keygen        → random keypair
                           private.key (passphrase-encrypted at rest)
                           public.key  (goes into executor)
                           identity.tzid (app_id + author_id + pubkey_id + keys)
-2. tunpak setup-server  → (key_mode 2 only) endpoint + master key (server-side only)
-3. tunpak setup-user    → distributor identity (author_id, name)
-4. tunpak gen-generator → builder carrying the (encrypted) private key
-5. tunpak gen-executor  → request build server to build executor with public key embedded
+2. quicktzs setup-server  → (key_mode 2 only) endpoint + master key (server-side only)
+3. quicktzs setup-user    → distributor identity (author_id, name)
+4. quicktzs gen-generator → builder carrying the (encrypted) private key
+5. quicktzs gen-executor  → request build server to build executor with public key embedded
 ```
 
 ## Key model
@@ -88,11 +88,11 @@ What IS enforced (not optional):
 ## Dev vs release
 
 ```
-tunpak dev run main.tun    # run straight from a folder: no pack, no sign, no encrypt,
+quicktzs dev run main.tun    # run straight from a folder: no pack, no sign, no encrypt,
                            # verbose errors (line numbers, tzst stack, typeof). Fast loop.
-tunpak build ./app -o module.pak   # compile + pack + encrypt + sign (release)
-tunpak lib-check mylib.so  # verify a lib's LFNT + ABI, list exports
-tunpak inspect module.pak  # dump entries + disassemble bytecode (debug)
+quicktzs build ./app -o module.qtz   # compile + pack + encrypt + sign (release)
+quicktzs lib-check mylib.so  # verify a lib's LFNT + ABI, list exports
+quicktzs inspect module.qtz  # dump entries + disassemble bytecode (debug)
 ```
 
 A release executor refuses unsigned input. A `--dev` executor may run unsigned/folder for

@@ -1,8 +1,8 @@
 //! `POST /key` (contract §2): license check, returns the per-app entry key.
 use crate::{hex32, text, Resp};
 use std::path::Path;
-use tunpak_crypto::hash::{hash_eq, sha256};
-use tunpak_crypto::hkdf::derive_entry_key;
+use quicktzs_crypto::hash::{hash_eq, sha256};
+use quicktzs_crypto::hkdf::derive_entry_key;
 
 /// Returns the response and the app_id when the body was well-formed.
 pub fn handle_key(data: &Path, body: &[u8]) -> (Resp, Option<u32>) {

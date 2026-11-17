@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use tunpak_format::buildreq::Target;
-use tunpak_format::types::{Arch, Platform};
+use quicktzs_format::buildreq::Target;
+use quicktzs_format::types::{Arch, Platform};
 
 pub fn triple(t: Target) -> Result<&'static str, String> {
     match (t.arch, t.platform) {
@@ -64,7 +64,7 @@ fn section(text: &str, header: &str) -> Result<String, String> {
     if out.is_empty() { Err(format!("template Cargo.toml has no {header} table")) } else { Ok(out) }
 }
 
-const KEYS_REL: &str = "crates/tunpak-executor/src/generated_keys.rs";
+const KEYS_REL: &str = "crates/exectzs/src/generated_keys.rs";
 
 /// Fixed work dir `<data>/work/src` (builds are serialized), synced from the template so cargo
 /// rebuilds only what changed; only the generated keys file is written per request.
@@ -131,7 +131,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<(bool, Vec<u8
 
 fn build_one(work: &Path, data: &Path, triple: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or("cargo".into()));
-    cmd.args(["build", "--locked", "--release", "-p", "tunpak-executor", "--target", triple])
+    cmd.args(["build", "--locked", "--release", "-p", "exectzs", "--target", triple])
         .current_dir(work)
         .env("CARGO_TARGET_DIR", data.join("target"))
         .env("CARGO_TERM_COLOR", "never");
@@ -151,7 +151,7 @@ fn build_one(work: &Path, data: &Path, triple: &str, timeout: Duration) -> Resul
         }
         return Err(format!("cargo build failed for {triple}:\n{hints}{}", &err[start..]));
     }
-    fs::read(data.join("target").join(triple).join("release/tunpak-executor")).map_err(|e| format!("built binary not readable: {e}"))
+    fs::read(data.join("target").join(triple).join("release/exectzs")).map_err(|e| format!("built binary not readable: {e}"))
 }
 
 /// One result per target, in order. Callers serialize calls (one build at a time).
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn work_dir_never_leaks_previous_keys() {
-        let data = std::env::temp_dir().join(format!("tunpak-bs-work-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("quicktzs-bs-work-{}", std::process::id()));
         let _ = fs::remove_dir_all(&data);
         let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let default = fs::read_to_string(template.join(KEYS_REL)).unwrap();

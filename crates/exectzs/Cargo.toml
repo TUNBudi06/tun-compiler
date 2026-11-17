@@ -1,0 +1,15 @@
+[package]
+name = "exectzs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quicktzs-format = { path = "../quicktzs-format" }
+quicktzs-crypto = { path = "../quicktzs-crypto" }
+obfstr = "0.4"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+libc = "0.2"

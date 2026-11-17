@@ -1,4 +1,4 @@
-//! TunPak build server: hand-written HTTP/1.1 over std::net (one request per connection).
+//! QuickTZS build server: hand-written HTTP/1.1 over std::net (one request per connection).
 //! shortcut: plain HTTP only (no TLS), front it with a TLS reverse proxy / tunnel; upgrade to
 //! rustls if the server is ever exposed directly.
 pub mod codegen;
@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tunpak_format::buildreq::BuildRequest;
-use tunpak_format::config::ServerConfig;
-use tunpak_format::FormatError;
+use quicktzs_format::buildreq::BuildRequest;
+use quicktzs_format::config::ServerConfig;
+use quicktzs_format::FormatError;
 
 pub struct Config {
     pub data: PathBuf,
@@ -23,7 +23,7 @@ pub struct Config {
     pub build_timeout: Duration,
     /// Total time allowed to read one request (head + body).
     pub read_deadline: Duration,
-    /// If set, `/build` requires header `X-Tunpak-Build-Token` equal to this.
+    /// If set, `/build` requires header `X-QuickTZS-Build-Token` equal to this.
     pub build_token: Option<Vec<u8>>,
 }
 
@@ -151,8 +151,9 @@ fn parse_head(raw: &[u8]) -> Result<Head, &'static str> {
                 h.content_length = Some(v.parse().map_err(|_| "bad Content-Length")?);
             }
             "transfer-encoding" => h.chunked = true,
-            "x-tunpak-master-key" => h.master_key = Some(v.into()),
-            "x-tunpak-build-token" => h.build_token = Some(v.into()),
+            // old X-Tunpak-* names kept for compatibility
+            "x-quicktzs-master-key" | "x-tunpak-master-key" => h.master_key = Some(v.into()),
+            "x-quicktzs-build-token" | "x-tunpak-build-token" => h.build_token = Some(v.into()),
             _ => {}
         }
     }
@@ -282,10 +283,10 @@ pub fn parse_build(body: &[u8], master_hex: Option<&str>) -> Result<Parsed, Stri
             Err(e) => return Err(format!("bad server_config: {e}")),
         }
     };
-    let master = master_hex.map(|h| hex32(h).ok_or("X-Tunpak-Master-Key must be 64 hex chars")).transpose()?;
+    let master = master_hex.map(|h| hex32(h).ok_or("X-QuickTZS-Master-Key must be 64 hex chars")).transpose()?;
     // SPEC-GAP: the spec's build_request has no field for key_mode/master key/server url; see contract §3.
     match (tsrv, master) {
-        (Some(_), Some(_)) => Err("send either server_config or X-Tunpak-Master-Key, not both".into()),
+        (Some(_), Some(_)) => Err("send either server_config or X-QuickTZS-Master-Key, not both".into()),
         (Some(c), None) => {
             if c.app_id != req.identity.app_id {
                 return Err("server_config app_id does not match the identity".into());
@@ -348,11 +349,11 @@ fn handle_build(cfg: &Config, lock: &Mutex<()>, body: &[u8], master_hex: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tunpak_crypto::hash::sha256;
-    use tunpak_crypto::hkdf::derive_entry_key;
-    use tunpak_format::buildreq::Target;
-    use tunpak_format::identity::{Identity, Key, KEY_ACTIVE};
-    use tunpak_format::types::{Arch, Platform};
+    use quicktzs_crypto::hash::sha256;
+    use quicktzs_crypto::hkdf::derive_entry_key;
+    use quicktzs_format::buildreq::Target;
+    use quicktzs_format::identity::{Identity, Key, KEY_ACTIVE};
+    use quicktzs_format::types::{Arch, Platform};
 
     fn identity() -> Identity {
         Identity {
@@ -454,7 +455,7 @@ mod tests {
         let cfg = Config { data: data.clone(), template: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), build_timeout: DEFAULT_BUILD_TIMEOUT, read_deadline: DEFAULT_READ_DEADLINE, build_token: Some(b"s3cret".to_vec()) };
         std::thread::spawn(move || serve(l, Arc::new(cfg)));
         assert_eq!(post(addr, "/build", b"x").0, 403);
-        let with = |t: &str| format!("POST /build HTTP/1.1\r\nX-Tunpak-Build-Token: {t}\r\nContent-Length: 1\r\n\r\nx");
+        let with = |t: &str| format!("POST /build HTTP/1.1\r\nX-QuickTZS-Build-Token: {t}\r\nContent-Length: 1\r\n\r\nx");
         assert_eq!(http(addr, with("wrong").as_bytes()).0, 403);
         assert_eq!(http(addr, with("s3cret").as_bytes()).0, 400); // authed, then garbage body
         // a running build makes /build answer 503 immediately
@@ -497,7 +498,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tunpak-bs-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("quicktzs-bs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("work")).unwrap();
         d
@@ -558,7 +559,7 @@ mod tests {
     #[ignore = "slow: release-builds the executor"]
     fn e2e_build_host_target() {
         // stable dir (kept after the test) so a second run shows the incremental build
-        let data = std::env::temp_dir().join("tunpak-bs-e2e-cache");
+        let data = std::env::temp_dir().join("quicktzs-bs-e2e-cache");
         std::fs::create_dir_all(data.join("work")).unwrap();
         let addr = start(&data);
         let req = BuildRequest {
@@ -589,7 +590,7 @@ mod tests {
         assert_eq!(results[1].0, 1);
         assert!(!results[1].1.is_empty());
         // no distributor key stays in the work dir
-        let keys = "crates/tunpak-executor/src/generated_keys.rs";
+        let keys = "crates/exectzs/src/generated_keys.rs";
         assert_eq!(std::fs::read(data.join("work/src").join(keys)).unwrap(), std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(keys)).unwrap());
     }
 }

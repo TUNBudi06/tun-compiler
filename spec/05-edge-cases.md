@@ -1,4 +1,4 @@
-# TunPak — Edge Cases (final behavior)
+# QuickTZS — Edge Cases (final behavior)
 
 Principle: **clear errors over silent behavior; compile-time over runtime when possible;
 atomic file writes.** These guard the "maker's writing is safe" promise.

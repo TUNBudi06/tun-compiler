@@ -1,4 +1,4 @@
-# TunPak — Plain-Text Language (main.tun & .tzst)
+# QuickTZS — Plain-Text Language (main.tun & .tzst)
 
 Blocks use `{ }`. **Statements end with `;` (strict).** Missing `;` is a compile error
 (`expected ';' at line N`). No `;` after a block's closing `}`. Comments start with `#`.
@@ -200,7 +200,7 @@ try {
 ### File discovery (within a NEED'd root)
 
 ```tzst
-let @files = glob "/data" "*.pak";
+let @files = glob "/data" "*.qtz";
 let @pick  = select @files "Pilih file:";
 let @many  = select_multi @files "Pilih beberapa:";
 ```
@@ -242,15 +242,15 @@ fn header(@buf, @pos) -> (@off, @size) {
 }
 
 start {
-    let @files = glob "/data" "*.pak";
+    let @files = glob "/data" "*.qtz";
     if len(@files) == 0 {
-        exit 1 "no .pak files";
+        exit 1 "no .qtz files";
     }
     let @pick = select @files "Pilih:";
 
     endian little;
     let @magic = read_u32 @pick 0;
-    if @magic == 0x00535A54 {          # "TZS\x00"
+    if @magic == 0x535A5451 {          # "QTZS"
         let (@o, @s) = header(@pick, 4);
         let @raw  = read @pick @o @s;
         let @data = zstd.decompress(@raw);

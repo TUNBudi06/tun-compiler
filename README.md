@@ -1,8 +1,8 @@
-# TunPak
+# QuickTZS
 
-TunPak is a signed module format (`.pak`), a launcher bytecode (`main.tun`), a small
+QuickTZS is a signed module format (`.qtz`), a launcher bytecode (`main.tun`), a small
 scripting language (`.tzst`) and a verifying executor, all in one Rust workspace. A
-distributor packs a module folder into a `.pak`, signs it with an Ed25519 key, and ships
+distributor packs a module folder into a `.qtz`, signs it with an Ed25519 key, and ships
 it together with an executor that carries only that distributor's public key. Heavy work
 (compression, hashing, regex, math) lives in native libraries called from the VM, never
 in opcodes.
@@ -54,7 +54,7 @@ start {
 Run it straight from the folder (no packing, no signing):
 
 ```sh
-$ tunpak dev run hello/main.tun
+$ quicktzs dev run hello/main.tun
 hello
 sq 1 = 1
 sq 2 = 4
@@ -64,10 +64,10 @@ sq 3 = 9
 Create a signing identity, then build and inspect a signed pak:
 
 ```sh
-export TUNPAK_PASSPHRASE=correct-horse   # otherwise you are prompted
-tunpak keygen -o keys                    # writes identity.tzid, public.key, master.key
-tunpak build hello -o hello.pak --identity keys/identity.tzid
-tunpak inspect hello.pak                 # entries, permissions, disassembly
+export QUICKTZS_PASSPHRASE=correct-horse   # otherwise you are prompted
+quicktzs keygen -o keys                    # writes identity.tzid, public.key, master.key
+quicktzs build hello -o hello.qtz --identity keys/identity.tzid
+quicktzs inspect hello.qtz                 # entries, permissions, disassembly
 ```
 
 `inspect` starts with:
@@ -89,16 +89,16 @@ the repository's workspace as its template (the default), and a Rust target for 
 platform you ask for.
 
 ```sh
-tunpak-buildserver --bind 127.0.0.1:7878 --data srvdata &
-tunpak gen-executor -i keys/identity.tzid --server http://127.0.0.1:7878 \
+quicktzs-buildserver --bind 127.0.0.1:7878 --data srvdata &
+quicktzs gen-executor -i keys/identity.tzid --server http://127.0.0.1:7878 \
     --target x64-linux -o out
-# x64-linux: wrote out/tunpak-executor-x64-linux
+# x64-linux: wrote out/exectzs-x64-linux
 ```
 
 Run the pak with the generated executor. Without `--yes` it prints the manifest and asks:
 
 ```sh
-$ ./out/tunpak-executor-x64-linux hello.pak
+$ ./out/exectzs-x64-linux hello.qtz
 This module requests the following permissions:
   App ID: ...   Author ID: ...   Pak version: 1
 Runs program: scripts/main.tzst
@@ -116,17 +116,17 @@ A release executor refuses `--dev`, and refuses a pak signed by any other key:
 error: signature verification failed (pak is corrupted or not signed by a trusted key)
 ```
 
-Other commands: `tunpak lib-check <lib.so>`, `tunpak setup-server`, `tunpak setup-user`,
-`tunpak gen-generator`. Run `tunpak --help` for the full list.
+Other commands: `quicktzs lib-check <lib.so>`, `quicktzs setup-server`, `quicktzs setup-user`,
+`quicktzs gen-generator`. Run `quicktzs --help` for the full list.
 
 ## Crates
 
-- `tunpak-format`: on-disk structs, layout constants, opcode table; shared by builder and executor.
-- `tunpak-crypto`: Ed25519 signing, SHA-256, ChaCha20-Poly1305, HKDF, compression; shared by builder and executor.
-- `tunpak-tzst`: lexer, parser, checker and codegen for `.tzst`.
-- `tunpak-builder`: the `tunpak` CLI: assembler for `main.tun`, packer, signing, keys, inspect, dev run.
-- `tunpak-executor`: the verifying executor and the VM (hardened release profile, `obfstr` on trust-path strings).
-- `buildserver`: HTTP server that builds executors with a distributor's public key embedded (`tunpak-buildserver`).
+- `quicktzs-format`: on-disk structs, layout constants, opcode table; shared by builder and executor.
+- `quicktzs-crypto`: Ed25519 signing, SHA-256, ChaCha20-Poly1305, HKDF, compression; shared by builder and executor.
+- `quicktzs-tzst`: lexer, parser, checker and codegen for `.tzst`.
+- `quicktzs-builder`: the `quicktzs` CLI: assembler for `main.tun`, packer, signing, keys, inspect, dev run.
+- `exectzs`: the verifying executor and the VM (hardened release profile, `obfstr` on trust-path strings).
+- `buildserver`: HTTP server that builds executors with a distributor's public key embedded (`quicktzs-buildserver`).
 
 ## Security model
 

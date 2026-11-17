@@ -1,17 +1,17 @@
 [package]
-name = "tunpak-buildserver"
+name = "quicktzs-buildserver"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "tunpak_buildserver"
+name = "quicktzs_buildserver"
 path = "src/lib.rs"
 
 [[bin]]
-name = "tunpak-buildserver"
+name = "quicktzs-buildserver"
 path = "src/main.rs"
 
 [dependencies]
-tunpak-format = { path = "../crates/tunpak-format" }
-tunpak-crypto = { path = "../crates/tunpak-crypto" }
+quicktzs-format = { path = "../crates/quicktzs-format" }
+quicktzs-crypto = { path = "../crates/quicktzs-crypto" }
 libc = "0.2"

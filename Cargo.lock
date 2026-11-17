@@ -199,6 +199,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "exectzs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "obfstr",
+ "quicktzs-crypto",
+ "quicktzs-format",
+ "rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -348,6 +360,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quicktzs-builder"
+version = "0.1.0"
+dependencies = [
+ "exectzs",
+ "quicktzs-crypto",
+ "quicktzs-format",
+ "quicktzs-tzst",
+]
+
+[[package]]
+name = "quicktzs-buildserver"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "quicktzs-crypto",
+ "quicktzs-format",
+]
+
+[[package]]
+name = "quicktzs-crypto"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hkdf",
+ "quicktzs-format",
+ "sha2",
+ "zeroize",
+ "zstd",
+]
+
+[[package]]
+name = "quicktzs-format"
+version = "0.1.0"
+
+[[package]]
+name = "quicktzs-tzst"
+version = "0.1.0"
+dependencies = [
+ "quicktzs-format",
 ]
 
 [[package]]
@@ -528,63 +585,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tunpak-builder"
-version = "0.1.0"
-dependencies = [
- "tunpak-crypto",
- "tunpak-executor",
- "tunpak-format",
- "tunpak-tzst",
-]
-
-[[package]]
-name = "tunpak-buildserver"
-version = "0.1.0"
-dependencies = [
- "libc",
- "tunpak-crypto",
- "tunpak-format",
-]
-
-[[package]]
-name = "tunpak-crypto"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hkdf",
- "sha2",
- "tunpak-format",
- "zeroize",
- "zstd",
-]
-
-[[package]]
-name = "tunpak-executor"
-version = "0.1.0"
-dependencies = [
- "libc",
- "obfstr",
- "rustls",
- "tunpak-crypto",
- "tunpak-format",
- "webpki-roots",
-]
-
-[[package]]
-name = "tunpak-format"
-version = "0.1.0"
-
-[[package]]
-name = "tunpak-tzst"
-version = "0.1.0"
-dependencies = [
- "tunpak-format",
 ]
 
 [[package]]

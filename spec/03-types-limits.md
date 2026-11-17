@@ -1,4 +1,4 @@
-# TunPak — Types, Limits, Variables, Std Libs
+# QuickTZS — Types, Limits, Variables, Std Libs
 
 ## Types (6)
 

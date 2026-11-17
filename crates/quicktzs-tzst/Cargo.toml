@@ -1,0 +1,7 @@
+[package]
+name = "quicktzs-tzst"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quicktzs-format = { path = "../quicktzs-format" }

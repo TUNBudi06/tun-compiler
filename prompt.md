@@ -1,6 +1,6 @@
-# Build Prompt — TunPak (for Fable orchestrating Sonnet subagents)
+# Build Prompt — QuickTZS (for Fable orchestrating Sonnet subagents)
 
-You are the lead (Fable). Build **TunPak** in Rust from the specs in `spec/*.md`. The spec
+You are the lead (Fable). Build **QuickTZS** in Rust from the specs in `spec/*.md`. The spec
 is the source of truth and is already complete — do NOT redesign it. Your job is to
 implement it faithfully, in milestones, delegating well-scoped work to Sonnet subagents
 and integrating their output.
@@ -57,10 +57,10 @@ For each milestone:
 
 ## Milestones (see 08-workspace.md for the full list)
 
-- **v0** `tunpak-format` (layout, opcodes, Entry/Dict) → assembler (main.tun only) →
+- **v0** `quicktzs-format` (layout, opcodes, Entry/Dict) → assembler (main.tun only) →
   packer (no sign/encrypt) → executor (read → run main.tun → RUN one exe), Linux. Prove a
-  `.pak` reads and runs end-to-end.
-- **v1** `tunpak-tzst` (lexer/parser/checker/codegen) + VM (stack/vars/frames, 256-depth
+  `.qtz` reads and runs end-to-end.
+- **v1** `quicktzs-tzst` (lexer/parser/checker/codegen) + VM (stack/vars/frames, 256-depth
   guard, control flow) + all 6 types + byte/string ops + cast/typeof.
 - **v2** crypto (sha256, ed25519 sign/verify; sign on build, verify on run) + permission
   table + manifest/approval + encryption (chacha20poly1305, key_mode 0/1) + std libs (json
@@ -75,18 +75,18 @@ For each milestone:
   round trip runs a trivial RUN.
 - v1: the two `.tzst` worked examples compile to the shown bytecode; golden-output tests
   for let/if/for/while/fn/tuple; the varint vectors pass.
-- v2: tamper a signed `.pak` → rejected; perm manifest lists NEED paths + RUN args; a tzst
+- v2: tamper a signed `.qtz` → rejected; perm manifest lists NEED paths + RUN args; a tzst
   that reads a file outside its NEED set is rejected at runtime; `json.parse` on malformed
   input errors with a position.
 - v3: keygen produces a random keypair (two runs differ); an executor built with pubkey A
-  rejects a `.pak` signed by key B; a revoked pubkey stops verifying.
+  rejects a `.qtz` signed by key B; a revoked pubkey stops verifying.
 - Encode `05-edge-cases.md` as a test module; every row is a test with the stated behavior.
 
 ## Deliverable shape
 
 A single Cargo workspace exactly as `08-workspace.md` lays out, building on Linux (Termux
-in v3), with `cargo test` green and a short `README.md` showing: build a module, `tunpak
-dev run`, `tunpak build`, run the `.pak`. Keep the executor's release profile hardened
+in v3), with `cargo test` green and a short `README.md` showing: build a module, `quicktzs
+dev run`, `quicktzs build`, run the `.qtz`. Keep the executor's release profile hardened
 (strip, lto, opt-z, panic=abort, obfstr) and the builder un-hardened.
 
 ## When unsure

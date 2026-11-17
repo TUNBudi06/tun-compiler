@@ -1,10 +1,10 @@
 //! Generates `generated_keys.rs` (contract §1). Nothing from a request reaches the source except
 //! numbers, byte arrays and one validated `{:?}` string literal.
 use std::fmt::Write;
-use tunpak_format::identity::{Identity, KEY_REVOKED};
+use quicktzs_format::identity::{Identity, KEY_REVOKED};
 
 pub fn validate_url(url: &str) -> Result<(), String> {
-    if tunpak_format::config::url_ok(url) {
+    if quicktzs_format::config::url_ok(url) {
         Ok(())
     } else {
         Err("server url must be http(s)://, at most 2048 bytes, printable ASCII without quote or backslash".into())
@@ -23,7 +23,7 @@ pub fn generated_keys_rs(
     server_url: Option<&str>,
 ) -> Result<String, String> {
     let mut s = String::from(
-        "//! GENERATED FILE by tunpak-buildserver. Do not edit.\n\
+        "//! GENERATED FILE by quicktzs-buildserver. Do not edit.\n\
          pub const APP_ID: Option<u32> = Some(",
     );
     let _ = write!(s, "{});\npub const AUTHOR_ID: Option<u32> = Some({});\n", identity.app_id, identity.author_id);
@@ -62,7 +62,7 @@ pub fn generated_keys_rs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tunpak_format::identity::{Key, KEY_ACTIVE};
+    use quicktzs_format::identity::{Key, KEY_ACTIVE};
 
     fn id() -> Identity {
         Identity {

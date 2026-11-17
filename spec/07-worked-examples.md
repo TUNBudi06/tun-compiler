@@ -1,4 +1,4 @@
-# TunPak — Worked Examples (text → compiled bytes)
+# QuickTZS — Worked Examples (text → compiled bytes)
 
 Width = 4 unless noted. Opcodes 2 bytes. Var index 1B. Const ref varint. Jump addr 4B.
 Int in const pool = varint. These are reference encodings the assembler must reproduce.
@@ -17,7 +17,7 @@ Refs from dict (width 4): `zstd_lib=0x00000001`, `api=0x00000003`, `app_tzst=0x0
 Compiled:
 ```
 HEADER (12B)
-54 55 4E 00     "TUN\0"
+4C 54 5A 53     "LTZS"   (was 54 55 4E 00 "TUN\0" before the rename; still accepted on read)
 01              version
 00              flags
 04              width = 4
@@ -134,7 +134,7 @@ At runtime, before executing, the executor shows the user:
 ▶ RUN: unpacker
   Description: "Extract game files"
   Arguments:
-    1: /home/user/games/level1.pak   (value of @pick)
+    1: /home/user/games/level1.qtz   (value of @pick)
     2: /data/out
 [Run]  [Run all]  [Deny]
 ```

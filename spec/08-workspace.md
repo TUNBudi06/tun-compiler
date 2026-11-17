@@ -1,13 +1,13 @@
-# TunPak — Workspace & Implementation Plan
+# QuickTZS — Workspace & Implementation Plan
 
 ## Cargo workspace
 
 ```
-tunpak/
+quicktzs/
 ├── Cargo.toml                 # [workspace]
 ├── spec/                      # these .md files — the source of truth
 ├── crates/
-│   ├── tunpak-format/         # SHARED: all struct defs + constants (binary format,
+│   ├── quicktzs-format/         # SHARED: all struct defs + constants (binary format,
 │   │   └── src/               #         opcodes, types, limits). Used by builder+executor.
 │   │       ├── lib.rs
 │   │       ├── layout.rs      # offsets/sizes constants
@@ -20,23 +20,23 @@ tunpak/
 │   │       ├── opcodes.rs     # opcode enum (from 02-opcodes.md)
 │   │       └── types.rs       # EntryType, KeyMode, Arch, Platform, flags, Value types
 │   │
-│   ├── tunpak-crypto/         # SHARED
+│   ├── quicktzs-crypto/         # SHARED
 │   │   └── src/{compress(zstd),encrypt(chacha20poly1305),hash(sha256),
 │   │             sign(ed25519),hkdf,kdf(argon2id)}.rs
 │   │
-│   ├── tunpak-tzst/           # SHARED compiler: .tzst/.tun text → bytecode
+│   ├── quicktzs-tzst/           # SHARED compiler: .tzst/.tun text → bytecode
 │   │   └── src/{lexer,parser,checker,codegen,opcodes,errors}.rs
 │   │
-│   ├── tunpak-builder/        # CLI (distributor side; NOT hardened)
+│   ├── quicktzs-builder/        # CLI (distributor side; NOT hardened)
 │   │   └── src/
 │   │       ├── main.rs        # keygen setup-* gen-* build dev lib-check inspect
 │   │       ├── commands/...
-│   │       ├── assembler.rs   # text → main.tun/.tzst bytes (uses tunpak-tzst)
-│   │       ├── packer.rs      # entries → .pak + dict + perm table
-│   │       ├── signer.rs      # sign (uses tunpak-crypto)
+│   │       ├── assembler.rs   # text → main.tun/.tzst bytes (uses quicktzs-tzst)
+│   │       ├── packer.rs      # entries → .qtz + dict + perm table
+│   │       ├── signer.rs      # sign (uses quicktzs-crypto)
 │   │       └── inspect.rs     # dump pak, disassemble
 │   │
-│   └── tunpak-executor/       # TEMPLATE (user side; HARDENED: strip, lto, obfstr)
+│   └── exectzs/       # TEMPLATE (user side; HARDENED: strip, lto, obfstr)
 │       └── src/
 │           ├── main.rs        # verify → parse → run main.tun → cleanup
 │           ├── verify.rs      # Ed25519 verify FIRST
@@ -69,21 +69,21 @@ Plus `obfstr` for embedded strings (server_url, etc.). Builder has no such harde
 ## Build order (incremental — each milestone runnable)
 
 **v0 (prove the pipeline):**
-1. `tunpak-format` — layout constants, opcode enum, Entry/Dict structs.
+1. `quicktzs-format` — layout constants, opcode enum, Entry/Dict structs.
 2. assembler for `main.tun` only (START/LOAD/MAIN, no if/loop) → bytes.
-3. packer → `.pak` + dict, **no sign/encrypt yet**.
+3. packer → `.qtz` + dict, **no sign/encrypt yet**.
 4. executor: read format → run main.tun → `RUN` one executable. Linux only.
-5. round-trip test: a `.pak` that reads and runs.
+5. round-trip test: a `.qtz` that reads and runs.
 
 **v1 (the language):**
-6. `tunpak-tzst` lexer/parser/checker/codegen for `.tzst` core (let, if, for, while, fn,
+6. `quicktzs-tzst` lexer/parser/checker/codegen for `.tzst` core (let, if, for, while, fn,
    arithmetic, comparisons, print).
 7. VM: stack, vars, frames (call stack, 256-depth guard), control flow.
 8. types: int/str/buf/arr, then object/tuple.
 9. byte ops (read_u*, align, write), string ops, cast/typeof.
 
 **v2 (security + libs):**
-10. `tunpak-crypto`: sha256, ed25519 sign/verify. Sign on build, verify on run.
+10. `quicktzs-crypto`: sha256, ed25519 sign/verify. Sign on build, verify on run.
 11. permission table + manifest rendering + user approval.
 12. encryption (chacha20poly1305) + key_mode 0/1 (HKDF). key_mode 2 stubbed.
 13. std libs (json first), CALL_LIB + LFNT, import resolution (scripts/ default).
@@ -97,11 +97,11 @@ Plus `obfstr` for embedded strings (server_url, etc.). Builder has no such harde
 
 ## Testing strategy
 
-- `tunpak-format`: round-trip serialize/parse for every struct.
+- `quicktzs-format`: round-trip serialize/parse for every struct.
 - assembler ↔ disassembler: assemble then disassemble, compare.
 - VM: golden `.tzst` programs with expected stdout/exit code.
 - edge cases from `05-edge-cases.md` as a test suite (each row = a test).
-- verify: tamper a signed `.pak`, assert rejection.
+- verify: tamper a signed `.qtz`, assert rejection.
 
 ## Non-negotiable invariants (do not violate while building)
 

@@ -1,11 +1,11 @@
-# CLAUDE.md — TunPak
+# CLAUDE.md — QuickTZS
 
 Rules for any Claude/agent working in this repo. Read `spec/*.md` before implementing;
 the spec is the source of truth and is complete — implement it, do not redesign it.
 
 ## What this is
 
-A signed module format (`.pak`) + launcher bytecode (`main.tun`) + a small scripting
+A signed module format (`.qtz`) + launcher bytecode (`main.tun`) + a small scripting
 language (`.tzst`) + a verifying executor. Rust, one Cargo workspace. See
 `spec/00-overview.md`.
 
@@ -42,7 +42,7 @@ language (`.tzst`) + a verifying executor. Rust, one Cargo workspace. See
 
 ## Conventions
 
-- `tunpak-format` + `tunpak-crypto` are shared by builder and executor. Put a struct in
+- `quicktzs-format` + `quicktzs-crypto` are shared by builder and executor. Put a struct in
   one place; both sides use it. No divergent copies of the format.
 - Builder is NOT hardened. Executor release profile IS: strip, lto, opt-level="z",
   panic="abort", codegen-units=1, plus obfstr on embedded strings.
@@ -60,9 +60,9 @@ report. Never silently invent format/opcode details.
 ## Commands (target CLI)
 
 ```
-tunpak dev run main.tun        # run from folder: no pack/sign/encrypt, verbose errors
-tunpak build ./app -o x.pak    # compile + pack + encrypt + sign
-tunpak lib-check mylib.so      # verify a lib's LFNT + ABI, list exports
-tunpak inspect x.pak           # dump entries + disassemble
-tunpak keygen / setup-* / gen-*  # distributor setup
+quicktzs dev run main.tun        # run from folder: no pack/sign/encrypt, verbose errors
+quicktzs build ./app -o x.qtz    # compile + pack + encrypt + sign
+quicktzs lib-check mylib.so      # verify a lib's LFNT + ABI, list exports
+quicktzs inspect x.qtz           # dump entries + disassemble
+quicktzs keygen / setup-* / gen-*  # distributor setup
 ```

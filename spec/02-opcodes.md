@@ -1,4 +1,4 @@
-# TunPak — Opcode Table
+# QuickTZS — Opcode Table
 
 All opcodes are **2 bytes** (big-endian in the listing below, e.g. `0x0001`). ~93 used of
 65,536. New heavy capability goes in a lib via `CALL_LIB`, never a new opcode.

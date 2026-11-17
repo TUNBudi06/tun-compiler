@@ -1,6 +1,6 @@
 target/
-*.pak
-!tests/**/*.pak
+*.qtz
+!tests/**/*.qtz
 *.key
 identity.tzid
 .serena/

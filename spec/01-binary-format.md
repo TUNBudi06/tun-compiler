@@ -1,4 +1,6 @@
-# TunPak — Binary Format
+# QuickTZS — Binary Format
+
+> Old magic values (`TUN\0` for main.tun, `TZS\0` for the module, `DICT` for the dict) are still accepted on read, so files from the TunPak era keep loading. Writers emit only the new magic.
 
 All integers little-endian unless stated. `width` (ref width, 4 or 8 bytes) is set once
 per pak in the DICT header and applies to ALL entry refs (`LOAD`, `RUN`, `LOAD_SRV`,
@@ -18,7 +20,7 @@ Encoding conventions:
 ## 1. main.tun (compiled)
 
 ```
-0x00  4B  magic        "TUN\x00"
+0x00  4B  magic        "LTZS"
 0x04  1B  version
 0x05  1B  flags        bit0=compressed bit1=encrypted
 0x06  1B  width        4 or 8 (mirrors dict; executor rejects if mismatched)
@@ -33,10 +35,10 @@ Header stays plaintext so the executor can read `version` even when the body is 
 
 ---
 
-## 2. .pak (container)
+## 2. .qtz (container)
 
 ```
-0x00            4B  magic        "TZS\x00"
+0x00            4B  magic        "QTZS"
 0x04            1B  version
 0x05            4B  dict_offset
 0x09            ..  blob         (all entry data, back-to-back)
@@ -57,7 +59,7 @@ BEFORE parsing the dict or touching any entry.
 ### Header
 
 ```
-0x00  4B  magic         "DICT"
+0x00  4B  magic         "TTZS"
 0x04  1B  version
 0x05  4B  app_id         project identity (anti pak-swap)
 0x09  4B  pak_version    content version (for distributor's own update/version checks)
@@ -86,7 +88,7 @@ BEFORE parsing the dict or touching any entry.
 +0x03  1B    flags         bit0=compressed bit1=encrypted bit2=executable bit3=streamed
 +0x04  1B    arch          0=any 1=x64 2=arm64
 +0x05  1B    platform      0=any 1=linux-glibc 2=termux
-+0x06  4B    offset        absolute offset in .pak
++0x06  4B    offset        absolute offset in .qtz
 +0x0A  4B    size          stored size (after compress+encrypt, includes AEAD tag)
 +0x0E  4B    orig_size     original size (anti decompression-bomb; cap decompress here)
 +0x12  12B   nonce         AEAD nonce; zero if not encrypted. MUST be unique per entry.

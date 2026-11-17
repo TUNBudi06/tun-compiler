@@ -1,0 +1,18 @@
+[package]
+name = "quicktzs-builder"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quicktzs-format = { path = "../quicktzs-format" }
+quicktzs-crypto = { path = "../quicktzs-crypto" }
+quicktzs-tzst = { path = "../quicktzs-tzst" }
+exectzs = { path = "../exectzs" }
+
+[[bin]]
+name = "quicktzs"
+path = "src/main.rs"
+
+[lib]
+name = "quicktzs_builder"
+path = "src/lib.rs"
