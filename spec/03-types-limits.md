@@ -26,6 +26,8 @@ recursion depth      256 frames  (runtime error with clear message when exceeded
 loop guard           timeout (default 30s; maker may override)
 memory per script    256 MB default; more via `NEED mem <size>` (shown in manifest)
 timeout per script   30 s default; more via `NEED time <dur>` (`90s`, `10m`, `2h`; shown in manifest)
+                     (also applies to the launcher and its RUN programs: the launcher's budget is the longest
+                     `time` row in the signed manifest; time spent inside a RUN script does not count against it)
 ON_EXIT handler      5s timeout
 entries per pak      ~4.29e9 (width 4) / ~1.8e19 (width 8)
 functions per tzst   65,535 (fn_id 2B)

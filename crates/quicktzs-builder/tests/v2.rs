@@ -523,3 +523,39 @@ fn append_from_launcher_commits_or_discards() {
     assert!(r.ok(), "{:?} {}", r.res, r.err);
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "one,two");
 }
+
+// Regression: time spent in a RUN script must not eat the launcher's budget, and a RUN program
+// from main.tun may run as long as any `NEED time` row in the signed manifest.
+fn timeout_opts(a: &Id) -> RunOptions {
+    RunOptions { timeout_ms: Some(300), ..release(trust(a, true)) }
+}
+
+#[test]
+fn launcher_clock_survives_slow_run_script() {
+    let a = new_id("lclock");
+    let d = tmp("lclock");
+    let data = tmp("lclock-data");
+    let out = data.join("out.txt");
+    put(&d, "main.tun", r#"MAIN { run "scripts/t"; run "run/x" -> "hi"; }"#);
+    put(&d, "run/x", "#!/bin/sh\necho ran\n");
+    put(&d, "scripts/t.tzst", &format!(
+        "NEED time 5s;\nNEED write \"{0}\";\nstart {{ let @i = 0; while @i < 800000 {{ @i = @i + 1; }} append \"done\" -> \"{1}\"; }}\n",
+        data.display(), out.display()));
+    let r = run(&pack_module(&d, &opts(&a, true, true)).unwrap(), &timeout_opts(&a), "");
+    assert!(matches!(r.res, Ok(0)), "{:?} {}", r.res, r.err);
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "done");
+}
+
+#[test]
+fn launcher_run_exec_honors_declared_time() {
+    let a = new_id("lexec");
+    let d = tmp("lexec");
+    put(&d, "main.tun", r#"MAIN { run "run/x" -> "hi"; }"#);
+    put(&d, "run/x", "#!/bin/sh\nsleep 0.6\necho ran\n");
+    put(&d, "scripts/t.tzst", "NEED time 5s;\nstart { }\n");
+    let r = run(&pack_module(&d, &opts(&a, true, true)).unwrap(), &timeout_opts(&a), "");
+    assert!(matches!(r.res, Ok(0)), "{:?} {}", r.res, r.err);
+    std::fs::remove_file(d.join("scripts/t.tzst")).unwrap();
+    let r = run(&pack_module(&d, &opts(&a, true, true)).unwrap(), &timeout_opts(&a), "");
+    assert!(format!("{:?} {}", r.res, r.err).contains("script timeout"), "{:?} {}", r.res, r.err);
+}

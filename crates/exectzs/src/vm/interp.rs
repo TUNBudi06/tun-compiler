@@ -175,7 +175,14 @@ impl<'a, 'io> Vm<'a, 'io> {
             term_color: opts.term_color,
         };
         let l = Launcher { loaded: vec![], perm_ids: vec![] };
-        let mut vm = Self::base(prog, io, env, Limits::from_opts(opts), Some(l));
+        let mut limits = Limits::from_opts(opts);
+        // the signed manifest's longest `time` row also budgets the launcher (and its RUN programs)
+        let declared = svc.pak.dict.perms.perms.iter().filter_map(|p| match p {
+            Perm::Path { kind: PermKind::Time, path } => ops::parse_dur(path),
+            _ => None,
+        });
+        limits.timeout = limits.timeout.max(declared.max().unwrap_or_default());
+        let mut vm = Self::base(prog, io, env, limits, Some(l));
         vm.svc = Some(svc);
         vm
     }
@@ -1538,8 +1545,15 @@ impl<'a, 'io> Vm<'a, 'io> {
             let mut nested = Vm::script(&unit.prog, &mut *self.io, env, self.limits).with_services(svc);
             nested.base_depth = self.base_depth + self.callers.len();
             nested.top = false;
+            let started = Instant::now();
             let code = nested.run_script();
             self.env = nested.env;
+            // the script had its own budget: its wall time does not count against the launcher
+            self.deadline += started.elapsed();
+            if let Some(t) = self.env.perms.time.filter(|t| *t > self.limits.timeout) {
+                self.deadline += t - self.limits.timeout;
+                self.limits.timeout = t;
+            }
             self.env.last_exit = code;
             return Ok(if code != 0 { Some(code) } else { None });
         }

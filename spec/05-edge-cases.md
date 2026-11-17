@@ -137,3 +137,5 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | 65th distinct staged path | runtime error `append: too many files in flight (max 64)` |
 | `write` / `lwrite` to a path with a staged append | runtime error `append in progress on '<path>'` |
 | `read` / `fsize` / `findloc` of a path with a staged append | see the old file (until commit) |
+| `RUN` of a script with `NEED time` that runs long, then a `RUN` of an executable | launcher clock is not consumed by the script; the executable runs normally |
+| `RUN` of an executable from main.tun longer than the default timeout, module declares `NEED time` | allowed up to the longest `time` row in the manifest; without any row, killed with `script timeout` |
