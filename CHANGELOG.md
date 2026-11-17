@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-17
 
-### Added: auto mkdir. Fixed: path check. Tested: signal cleanup (`SEE-BELOW`)
+### Added: auto mkdir. Fixed: path check. Tested: signal cleanup (`1044f6e`)
 - `write` and `append` create missing parent folders, only inside the `NEED write` folder. The
   `NEED write` folder itself is created if it's missing, because the signed manifest declares
   it. If the write fails, times out or is interrupted, the empty folders it created are removed
