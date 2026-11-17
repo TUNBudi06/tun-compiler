@@ -164,6 +164,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                 _ => return Err(err(format!("bad number suffix '{suf}'"))),
             };
             let tok = if mul == 0 {
+                // hex wraps on purpose (0xFFFF_FFFF_FFFF_FFFF = -1); decimal must fit i64
+                if !hex && n > i64::MAX as u64 {
+                    return Err(err("integer literal out of range".into()));
+                }
                 Tok::Int(n)
             } else {
                 Tok::Size(n.checked_mul(mul).ok_or_else(|| err("size literal overflows".into()))?)

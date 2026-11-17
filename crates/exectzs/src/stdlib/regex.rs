@@ -26,7 +26,7 @@ enum Item {
 enum Node {
     Char(char),
     Any,
-    Class(bool, Vec<Item>),
+    Class(bool, std::rc::Rc<[Item]>),
     Start,
     End,
     Group(Box<Node>, usize),
@@ -39,7 +39,7 @@ enum Node {
 enum Ins {
     Char(char),
     Any,
-    Class(bool, Vec<Item>),
+    Class(bool, std::rc::Rc<[Item]>),
     Start,
     End,
     Split(usize, usize), // try first, then second
@@ -205,14 +205,14 @@ impl Parser {
                 if items.is_empty() {
                     return Err("regex: empty character class".into());
                 }
-                Node::Class(neg, items)
+                Node::Class(neg, items.into())
             }
             '\\' => {
                 let e = self.peek().ok_or("regex: dangling '\\'")?;
                 self.i += 1;
                 match self.escape_item(e, false)? {
                     Item::Range(a, _) => Node::Char(a),
-                    other => Node::Class(false, vec![other]),
+                    other => Node::Class(false, vec![other].into()),
                 }
             }
             c => Node::Char(c),
@@ -338,6 +338,13 @@ impl Regex {
                 *steps += 1;
                 if *steps > STEP_BUDGET {
                     return Err("regex too complex (step budget exceeded)".into());
+                }
+                if let Ins::Class(_, items) = &self.prog[pc] {
+                    // class_hit is O(items): charge for it so the budget bounds real work
+                    *steps += items.len().saturating_sub(1) as u64;
+                    if *steps > STEP_BUDGET {
+                        return Err("regex too complex (step budget exceeded)".into());
+                    }
                 }
                 match &self.prog[pc] {
                     Ins::Match => {
@@ -468,6 +475,16 @@ mod tests {
     }
     fn m(text: &str, pat: &str) -> bool {
         r("match", &[text, pat]).unwrap() == "1"
+    }
+
+    #[test]
+    fn big_class_charged_to_budget() {
+        let text: String = std::iter::repeat('\u{9D0E}').take(3000).collect();
+        let cls: String = (0..5000u32).map(|i| char::from_u32(0x4E00 + 2 * i).unwrap()).collect();
+        let t0 = std::time::Instant::now();
+        let e = r("match", &[&text, &format!("[{cls}]{{1000}}x")]).unwrap_err();
+        assert!(e.contains("too complex"), "{e}");
+        assert!(t0.elapsed().as_secs() < 5);
     }
 
     #[test]

@@ -542,3 +542,30 @@ fn fsize_findloc_append_exact_bytes() {
     assert!(c("start { let @b = \"x\"; append @b -> \"/f\" }").is_err());
     assert!(c("start { let @n = fsize; }").is_err());
 }
+
+fn deep_err(src: String) {
+    let e = c(&src).unwrap_err();
+    assert!(e.msg.contains("nesting too deep"), "{}", e.msg);
+}
+
+#[test]
+fn deep_nesting_is_a_compile_error_not_a_crash() {
+    let n = 100_000;
+    let body = |x: String| format!("start {{ let @a = {x}; }}");
+    deep_err(body(format!("{}1{}", "(".repeat(n), ")".repeat(n))));
+    deep_err(body(format!("{}1{}", "[".repeat(n), "]".repeat(n))));
+    deep_err(body(format!("{}1", "-".repeat(n))));
+    deep_err(body(vec!["1"; 1500].join("+")));
+    deep_err(format!("start {{ {} print 1; {} }}", "if 1 {".repeat(n), "}".repeat(n)));
+    // the cap is still roomy enough for real programs
+    ok(&body(vec!["1"; 150].join("+")));
+    ok(&body(format!("{}1{}", "(".repeat(50), ")".repeat(50))));
+}
+
+#[test]
+fn decimal_literal_out_of_i64_is_an_error() {
+    let e = c("start { print 9223372036854775808; }").unwrap_err();
+    assert!(e.msg.contains("integer literal out of range"), "{e}");
+    assert!(c("start { print 18446744073709551615; }").is_err());
+    ok("start { print 9223372036854775807; print 0xFFFFFFFFFFFFFFFF; }");
+}

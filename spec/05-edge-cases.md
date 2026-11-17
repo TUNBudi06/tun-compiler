@@ -139,3 +139,7 @@ atomic file writes.** These guard the "maker's writing is safe" promise.
 | `read` / `fsize` / `findloc` of a path with a staged append | see the old file (until commit) |
 | `RUN` of a script with `NEED time` that runs long, then a `RUN` of an executable | launcher clock is not consumed by the script; the executable runs normally |
 | `RUN` of an executable from main.tun longer than the default timeout, module declares `NEED time` | allowed up to the longest `time` row in the manifest; without any row, killed with `script timeout` |
+| decimal integer literal above `9223372036854775807` (e.g. `9223372036854775808`) | compile error `integer literal out of range` (`i64::MIN` is not writable as a literal; hex wraps by design: `0xFFFFFFFFFFFFFFFF` = -1) |
+| nesting deeper than the cap (parens / `[` / `if` blocks: 64 levels; expression tree incl. flat `1+1+...` chains and unary runs: 200) | compile error `nesting too deep (max N)` with line, never a crash; main.tun `if` blocks capped at 64 |
+| `-o` target dir has a planted symlink at a guessable temp name | ignored: temp is `<path>.tmp.<pid>.<random>`, created O_EXCL; the symlink target is untouched |
+| `std/regex` huge character class repeated | class cost is charged to the step budget: `regex too complex` quickly |

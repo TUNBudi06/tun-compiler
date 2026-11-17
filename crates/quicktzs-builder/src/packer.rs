@@ -449,7 +449,7 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Write to `<path>.tmp.<pid>` in the same directory, fsync, rename (invariant 9).
+/// Write to `<path>.tmp.<pid>.<random>` (O_EXCL) in the same directory, fsync, rename (invariant 9).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
     write_atomic_mode(path, bytes, None)
 }
@@ -457,17 +457,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
 /// `write_atomic` with an explicit unix file mode (key material: 0600, set at creation).
 pub fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), BuildError> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".tmp.{}", std::process::id()));
-    let tmp = std::path::PathBuf::from(tmp);
     let io = |e: std::io::Error| BuildError::Io(format!("cannot write {}: {e}", path.display()));
-    let res = (|| {
+    // O_EXCL (create_new) never follows a planted symlink and never reuses a pre-existing file;
+    // the random suffix keeps the name unpredictable, AlreadyExists just picks another.
+    let mut attempt = 0;
+    let (mut f, tmp) = loop {
+        let rnd = quicktzs_crypto::encrypt::random_bytes::<8>().map_err(|e| BuildError::Io(e.to_string()))?;
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".tmp.{}.{}", std::process::id(), rnd.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        let tmp = std::path::PathBuf::from(name);
         let mut oo = fs::OpenOptions::new();
-        oo.write(true).create(true).truncate(true);
+        oo.write(true).create_new(true);
         if let Some(m) = mode {
             oo.mode(m);
         }
-        let mut f = oo.open(&tmp)?;
+        match oo.open(&tmp) {
+            Ok(f) => break (f, tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => attempt += 1,
+            Err(e) => return Err(io(e)),
+        }
+    };
+    let res = (|| {
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
@@ -491,6 +501,24 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn write_atomic_ignores_planted_symlink_and_sets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("atomic-symlink");
+        let victim = d.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        let out = d.join("x.qtz");
+        std::os::unix::fs::symlink(&victim, d.join(format!("x.qtz.tmp.{}", std::process::id()))).unwrap();
+        write_atomic(&out, b"new").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(fs::read(&out).unwrap(), b"new");
+        let key = d.join("k");
+        fs::write(&key, b"old").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_mode(&key, b"secret", Some(0o600)).unwrap();
+        assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     fn put(d: &Path, rel: &str, data: &[u8]) {

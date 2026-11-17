@@ -257,10 +257,17 @@ struct P<'a> {
     toks: Vec<Token>,
     pos: usize,
     src: &'a str,
+    depth: usize,
+    nest: usize,
 }
 
+// Debug-build parser frames cost ~25KB per paren/block level, so nesting is capped low; the
+// tree-depth cap bounds checker/codegen recursion (a flat `1+1+...` chain is left-deep).
+const MAX_NEST: usize = 64;
+const MAX_TREE: usize = 200;
+
 pub fn parse(src: &str) -> Res<Program> {
-    let mut p = P { toks: lex(src)?, pos: 0, src };
+    let mut p = P { toks: lex(src)?, pos: 0, src, depth: 0, nest: 0 };
     p.program()
 }
 
@@ -274,6 +281,24 @@ impl P<'_> {
     }
     fn peek_at(&self, n: usize) -> Option<&Tok> {
         self.toks.get(self.pos + n).map(|t| &t.tok)
+    }
+    /// Bump the nesting/tree depth by `n`; the caller restores `self.depth`.
+    fn dive(&mut self, n: usize) -> Res<()> {
+        self.depth += n;
+        if self.depth > MAX_TREE {
+            let (l, c) = self.here();
+            return Err(CompileError::new(l, c, format!("nesting too deep (max {MAX_TREE})")));
+        }
+        Ok(())
+    }
+    /// Enter a paren/bracket/block level (the heavy recursion); the caller restores `self.nest`.
+    fn enter(&mut self) -> Res<()> {
+        self.nest += 1;
+        if self.nest > MAX_NEST {
+            let (l, c) = self.here();
+            return Err(CompileError::new(l, c, format!("nesting too deep (max {MAX_NEST})")));
+        }
+        self.dive(1)
     }
     fn here(&self) -> Pos {
         self.peek().or(self.toks.last()).map_or((1, 1), |t| (t.line, t.col))
@@ -457,10 +482,13 @@ impl P<'_> {
 
     fn block(&mut self) -> Res<Vec<Stmt>> {
         self.expect("{")?;
+        let (d, n) = (self.depth, self.nest);
+        self.enter()?;
         let mut v = vec![];
         while !self.is_punct("}") {
             v.push(self.stmt()?);
         }
+        (self.depth, self.nest) = (d, n);
         self.pos += 1;
         Ok(v)
     }
@@ -684,7 +712,11 @@ impl P<'_> {
     // ---------------------------------------------------------------- expressions
 
     pub fn expr(&mut self) -> Res<Expr> {
-        self.lvl(&[("or", Bin::Or)], Self::and)
+        let (d, n) = (self.depth, self.nest);
+        self.enter()?;
+        let r = self.lvl(&[("or", Bin::Or)], Self::and);
+        (self.depth, self.nest) = (d, n);
+        r
     }
     fn and(&mut self) -> Res<Expr> {
         self.lvl(&[("and", Bin::And)], Self::not)
@@ -693,7 +725,10 @@ impl P<'_> {
         if self.is_ident("not") {
             let pos = self.here();
             self.pos += 1;
+            let d = self.depth;
+            self.dive(1)?;
             let x = self.not()?;
+            self.depth = d;
             return Ok(Expr { k: EK::Un(Un::Not, Box::new(x)), pos });
         }
         self.lvl(
@@ -740,12 +775,15 @@ impl P<'_> {
 
     fn lvl(&mut self, ops: &[(&str, Bin)], next: fn(&mut Self) -> Res<Expr>) -> Res<Expr> {
         let mut l = next(self)?;
+        let d = self.depth;
         while let Some(b) = self.cur_op().and_then(|s| ops.iter().find(|(n, _)| *n == s).map(|(_, b)| *b)) {
             let pos = self.here();
             self.pos += 1;
+            self.dive(1)?; // a left-assoc chain is a left-deep tree: its length is depth
             let r = next(self)?;
             l = Expr { k: EK::Bin(b, Box::new(l), Box::new(r)), pos };
         }
+        self.depth = d;
         Ok(l)
     }
 
@@ -759,15 +797,20 @@ impl P<'_> {
             return self.postfix();
         };
         self.pos += 1;
+        let d = self.depth;
+        self.dive(1)?;
         let x = self.unary()?;
+        self.depth = d;
         Ok(Expr { k: EK::Un(op, Box::new(x)), pos })
     }
 
     fn postfix(&mut self) -> Res<Expr> {
         let mut e = self.primary()?;
+        let d = self.depth;
         while self.is_punct("[") {
             let pos = self.here();
             self.pos += 1;
+            self.dive(1)?;
             let i = self.expr()?;
             e = if self.eat(":") {
                 let j = self.expr()?;
@@ -777,6 +820,7 @@ impl P<'_> {
             };
             self.expect("]")?;
         }
+        self.depth = d;
         Ok(e)
     }
 
@@ -947,7 +991,7 @@ impl P<'_> {
                 }
                 let mut toks = lex(&inner).map_err(|e| err(t, format!("in f-string: {}", e.msg)))?;
                 toks.iter_mut().for_each(|k| (k.line, k.col) = (t.line, t.col));
-                let mut sub = P { toks, pos: 0, src: self.src };
+                let mut sub = P { toks, pos: 0, src: self.src, depth: self.depth, nest: self.nest };
                 let e = sub.expr().map_err(|e| err(t, format!("in f-string: {}", e.msg)))?;
                 if sub.pos != sub.toks.len() {
                     return Err(err(t, "unexpected token in f-string {...}"));

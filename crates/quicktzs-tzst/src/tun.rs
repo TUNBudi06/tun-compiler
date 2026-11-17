@@ -17,6 +17,7 @@ fn err(t: &Token, m: impl Into<String>) -> CompileError {
 struct P<'a> {
     toks: Vec<Token>,
     pos: usize,
+    depth: usize,
     width: Width,
     resolve: Resolver<'a>,
     consts: Vec<Const>,
@@ -220,9 +221,15 @@ impl<'a> P<'a> {
     }
     fn body(&mut self) -> Result<(), CompileError> {
         self.expect("{")?;
+        self.depth += 1;
+        if self.depth > 64 {
+            let (l, c) = self.toks.get(self.pos).or(self.toks.last()).map_or((1, 1), |t| (t.line, t.col));
+            return Err(CompileError::new(l, c, "nesting too deep (max 64)"));
+        }
         while !self.is_punct("}") {
             self.stmt()?;
         }
+        self.depth -= 1;
         self.pos += 1;
         Ok(())
     }
@@ -442,6 +449,7 @@ pub fn compile(src: &str, width: Width, resolve: Resolver) -> Result<TunOutput, 
     let mut p = P {
         toks: lex(src)?,
         pos: 0,
+        depth: 0,
         width,
         resolve,
         consts: vec![],
@@ -471,6 +479,12 @@ mod tests {
     }
     fn c(s: &str) -> Result<TunOutput, CompileError> {
         compile(s, Width::W4, &res)
+    }
+
+    #[test]
+    fn deep_if_nesting_is_a_compile_error() {
+        let src = format!("LOAD {{ {} halt; {} }}", "if 1 < 2 {".repeat(100_000), "}".repeat(100_000));
+        assert!(c(&src).unwrap_err().msg.contains("nesting too deep"));
     }
 
     #[test]
