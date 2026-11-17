@@ -11,6 +11,18 @@ The executor does not guarantee that a module is safe. It guarantees that the us
 what the module will do before it runs: the signed permission manifest (file paths,
 programs to run, real argument values) is shown first and needs approval.
 
+## Prebuilt binaries
+
+Linux builds (glibc; `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`) are
+published as `quicktzs-<version>-<target>.tar.gz` (+ `.sha256`) on the
+[Releases page](https://github.com/TUNBudi06/tun-compiler/releases) for `v*` tags, and as
+workflow artifacts of the `Release` Actions run for every push to `main`. Each archive has
+`quicktzs`, `exectzs`, `quicktzs-buildserver` and this README.
+
+The prebuilt `exectzs` is generic: it has no distributor keys built in, so it trusts no
+signing key and will not accept your paks. To ship paks to users, a distributor builds an executor that
+trusts their own key with `quicktzs gen-executor` (see below).
+
 ## Quick start
 
 Requires a stable Rust toolchain. The tests also need `gcc`.
