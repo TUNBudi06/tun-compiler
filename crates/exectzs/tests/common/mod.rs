@@ -228,7 +228,9 @@ pub fn prog(body: impl FnOnce(&mut Asm)) -> Out {
 }
 
 pub fn tmpdir(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("quicktzs-vmtest-{}-{name}", std::process::id()));
+    // CARGO_TARGET_TMPDIR is under target/ (real disk), not /tmp (a RAM-disk here): big-file
+    // lwrite/bench tests must not exhaust tmpfs.
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("quicktzs-vmtest-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d.canonicalize().unwrap()

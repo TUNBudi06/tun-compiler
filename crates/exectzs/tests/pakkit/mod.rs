@@ -245,7 +245,8 @@ pub fn run_entry(pak: &[u8], path: &str, opts: &RunOptions, input: &str) -> Run 
 pub fn tmpdir(name: &str) -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let d = std::env::temp_dir().join(format!("quicktzs-pk-{}-{name}-{n}", std::process::id()));
+    // target/ (real disk), not /tmp (RAM-disk here) — see common::tmpdir.
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("quicktzs-pk-{}-{name}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

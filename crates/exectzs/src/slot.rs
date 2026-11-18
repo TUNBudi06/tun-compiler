@@ -36,36 +36,46 @@ fn read_slot() -> Vec<u8> {
     (SLOT_SIZE - SLOT_BODY..SLOT_SIZE).map(|i| unsafe { std::ptr::read_volatile(p.add(i)) }).collect()
 }
 
-pub fn resolve_body(body: &[u8]) -> Resolved {
-    match SlotConfig::from_body(body) {
-        Ok(Some(c)) => Resolved::Slot(Trust {
-            app_id: Some(c.app_id),
-            author_id: Some(c.author_id),
-            keys: c.pubkeys.iter().map(|&(id, public, revoked)| TrustedKey { id, public, revoked }).collect(),
-            master_key: c.master_key,
-            key_mode: c.key_mode,
-            server_url: Some(c.server_url).filter(|u| !u.is_empty()),
-            op_seed: c.op_seed,
-        }),
-        Ok(None) => Resolved::Blank(Trust::default()),
-        Err(_) => Resolved::Corrupt,
+fn trust_of(c: &SlotConfig) -> Trust {
+    Trust {
+        app_id: Some(c.app_id),
+        author_id: Some(c.author_id),
+        keys: c.pubkeys.iter().map(|&(id, public, revoked)| TrustedKey { id, public, revoked }).collect(),
+        master_key: c.master_key,
+        key_mode: c.key_mode,
+        server_url: Some(c.server_url.clone()).filter(|u| !u.is_empty()),
+        op_seed: c.op_seed,
     }
 }
 
-pub fn resolved() -> &'static Resolved {
-    static R: OnceLock<Resolved> = OnceLock::new();
-    R.get_or_init(|| resolve_body(&read_slot()))
+/// Resolved trust + stamped `.text` hash. The slot is read, unmasked and checksummed exactly ONCE.
+struct State {
+    trust: Resolved,
+    text_hash: Option<[u8; 32]>,
+}
+
+fn state_of(body: &[u8]) -> State {
+    match SlotConfig::from_body(body) {
+        Ok(Some(c)) => State { text_hash: c.text_hash, trust: Resolved::Slot(trust_of(&c)) },
+        Ok(None) => State { text_hash: None, trust: Resolved::Blank(Trust::default()) },
+        Err(_) => State { text_hash: None, trust: Resolved::Corrupt },
+    }
+}
+
+fn state() -> &'static State {
+    static S: OnceLock<State> = OnceLock::new();
+    S.get_or_init(|| state_of(&read_slot()))
 }
 
 /// The trust this executor was configured with, or the generic refusal if its slot is corrupt.
 pub fn resolved_trust() -> Result<Trust, crate::ExecError> {
-    match resolved() {
+    match &state().trust {
         Resolved::Slot(t) | Resolved::Blank(t) => Ok(t.clone()),
         Resolved::Corrupt => Err(crate::ExecError::new(crate::EXIT_ERROR, "integrity check failed")),
     }
 }
 
-/// `.text` hash stamped by make-executor (spec/09 2.3); `None` = unpatched or an older slot.
+/// `.text` hash stamped by make-executor (spec/09 2.3); `None` = unpatched, older slot, or corrupt.
 pub fn text_hash() -> Option<[u8; 32]> {
-    SlotConfig::from_body(&read_slot()).ok().flatten().and_then(|c| c.text_hash)
+    state().text_hash
 }

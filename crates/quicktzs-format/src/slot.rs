@@ -15,8 +15,7 @@ pub const SLOT_BODY: usize = SLOT_SIZE - SLOT_MAGIC.len();
 pub const SLOT_VERSION: u8 = 2;
 pub const MAX_PUBKEYS: usize = 16;
 pub const MAX_SERVER_URL: usize = 512;
-/// `flags` bit 0: the distributor requires online key checks (reserved; not interpreted yet).
-pub const FLAG_REQUIRE_ONLINE: u8 = 1;
+// `flags` is a reserved byte in the payload (kept for format stability); no bits are defined yet.
 
 // SPEC-GAP: spec/09 §4.2 says "a fixed obfuscation key" without choosing one; this 32-byte key is a
 // speed bump only (keeps op_seed/master_key out of `strings`), not obfstr'd (format crate has no obfstr).
