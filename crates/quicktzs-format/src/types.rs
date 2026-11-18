@@ -96,6 +96,8 @@ pub const ENTRY_STREAMED: u8 = 1 << 3;
 // DICT gflags (§3).
 pub const GFLAG_REQUIRE_ONLINE: u8 = 1 << 0;
 pub const GFLAG_DEBUG: u8 = 1 << 1;
+/// Opcodes are permuted by the distributor's op_seed (spec/09 §1); only a paired executor can run it.
+pub const GFLAG_OP_KEYED: u8 = 1 << 2;
 
 // main.tun header flags (§1).
 pub const TUN_COMPRESSED: u8 = 1 << 0;

@@ -159,14 +159,15 @@ pub fn gen_executor(identity: &Path, server: &str, targets: Vec<Target>, out: &P
             return msg(format!("server config is for app_id {}, identity has {}", cfg.app_id, id.app_id));
         }
     }
+    let id_keyed = id.op_seed.is_some();
     let req = BuildRequest { version: TBRQ_VERSION, identity: id, targets: targets.clone(), options: OPT_STRIP | OPT_OBFSTR };
     let mut body = Vec::new();
     req.serialize(&mut body)?;
     body.extend(tsrv.unwrap_or_default());
     let (host, _) = crate::http::parse_url(server)?;
     let h = host.rsplit_once(':').map_or(host.as_str(), |x| x.0);
-    if master.is_some() && !matches!(h, "localhost" | "127.0.0.1" | "[::1]") {
-        return msg(format!("refusing to send the master key over plain http to '{h}'; use an SSH tunnel and --server http://localhost:PORT"));
+    if (master.is_some() || id_keyed) && !matches!(h, "localhost" | "127.0.0.1" | "[::1]") {
+        return msg(format!("refusing to send the master key or op_seed over plain http to '{h}'; use an SSH tunnel and --server http://localhost:PORT"));
     }
     let mut hdr: Vec<(&str, String)> = master.iter().map(|m| ("X-QuickTZS-Master-Key", hex(&m.0))).collect();
     if let Some(t) = token {

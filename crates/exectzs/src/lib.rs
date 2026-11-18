@@ -64,6 +64,8 @@ pub struct Trust {
     pub key_mode: u8,
     /// key_mode 2 endpoint (`http://host[:port][/base]`).
     pub server_url: Option<String>,
+    /// Keyed-opcode seed this executor was built with (spec/09 §1); `None` = generic executor.
+    pub op_seed: Option<[u8; 32]>,
 }
 
 impl Trust {
@@ -77,6 +79,7 @@ impl Trust {
             master_key: g::master_key(),
             key_mode: g::KEY_MODE,
             server_url: Some(g::server_url()).filter(|u| !u.is_empty()),
+            op_seed: g::op_seed(),
         }
     }
 }
@@ -136,7 +139,7 @@ pub fn run_pak_entry_io(pak: &[u8], entry_path: &str, opts: &RunOptions, io: &mu
 /// code: `Ok(code)` whenever the script ran to an end (HALT 0, EXIT n, uncaught error 1 with the
 /// message on `io.err`, permission violation 126); `Err` only for executor-side failures.
 pub fn run_tzst(file: &quicktzs_format::tzst::TzstFile, opts: &RunOptions, io: &mut Io) -> Result<i32, ExecError> {
-    let prog = vm::program::Program::from_tzst(file)?;
+    let prog = vm::program::Program::from_tzst(file, None)?;
     let sb = sandbox::Sandbox::new()?;
     let env = vm::interp::Env {
         dev: opts.dev,
@@ -190,7 +193,7 @@ fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io)
         return Ok((code, vm.env.last_exit));
     }
     let tun = pak.tun()?;
-    let prog = vm::program::Program::build(&tun.consts, &tun.code, tun.header.width, &[])?;
+    let prog = vm::program::Program::build(&tun.consts, &tun.code, tun.header.width, &[], pak.op_inv())?;
     let mut vm = vm::interp::Vm::launcher(&prog, &svc, io);
     let code = vm.run_launcher()?;
     Ok((code, vm.env.last_exit))

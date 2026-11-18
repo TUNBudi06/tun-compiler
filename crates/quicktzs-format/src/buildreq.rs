@@ -79,6 +79,7 @@ mod tests {
                 author_id: 2,
                 pubkey_id: 0,
                 keys: vec![Key { id: 0, status: KEY_ACTIVE, public_key: [8; 32], enc_priv: vec![] }],
+                op_seed: None,
             },
             targets: vec![
                 Target { arch: Arch::X64, platform: Platform::LinuxGlibc },

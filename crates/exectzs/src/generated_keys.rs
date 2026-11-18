@@ -18,3 +18,7 @@ pub fn master_key() -> Option<[u8; 32]> {
 pub fn server_url() -> String {
     String::new()
 }
+/// Keyed-opcode seed (spec/09 §1); `Some` only for a distributor whose identity carries an op_seed.
+pub fn op_seed() -> Option<[u8; 32]> {
+    None
+}

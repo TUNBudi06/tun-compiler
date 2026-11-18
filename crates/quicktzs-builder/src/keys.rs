@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use quicktzs_crypto::{encrypt::random_bytes, kdf, sign};
 use quicktzs_format::identity::{Identity, Key, KEY_ACTIVE, KEY_REVOKED};
-use quicktzs_format::layout::TZID_VERSION;
+use quicktzs_format::identity::TZID_VERSION_OP_SEED;
 
 use crate::packer::{write_atomic_mode, BuildError};
 
@@ -87,7 +87,8 @@ pub fn keygen(dir: &Path, passphrase: &[u8], force: bool) -> Result<Generated, B
     fs::create_dir_all(dir).map_err(|e| BuildError::Io(format!("cannot create {}: {e}", dir.display())))?;
     let key = new_key(1, passphrase)?;
     let [app_id, author_id] = [u32::from_le_bytes(random_bytes::<4>().map_err(crypto)?), u32::from_le_bytes(random_bytes::<4>().map_err(crypto)?)];
-    let id = Identity { version: TZID_VERSION, app_id, author_id, pubkey_id: 1, keys: vec![key] };
+    let op_seed = Some(random_bytes::<32>().map_err(crypto)?);
+    let id = Identity { version: TZID_VERSION_OP_SEED, app_id, author_id, pubkey_id: 1, keys: vec![key], op_seed };
     let public = id.keys[0].public_key;
     let master = Secret(random_bytes::<32>().map_err(crypto)?);
     save_identity(&files[0], &id)?;

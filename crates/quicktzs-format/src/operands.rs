@@ -265,9 +265,18 @@ fn read_src(code: &[u8], pos: &mut usize) -> Result<Src, FormatError> {
 
 /// Decode the instruction at `pc`. Never panics on hostile input.
 pub fn decode(code: &[u8], pc: usize, width: Width) -> Result<Insn, FormatError> {
+    decode_keyed(code, pc, width, None)
+}
+
+/// [`decode`] for keyed modules: `inv` is `opmap::inverse_table` (raw opcode -> canonical).
+pub fn decode_keyed(code: &[u8], pc: usize, width: Width, inv: Option<&[u16]>) -> Result<Insn, FormatError> {
     let mut pos = pc;
     let raw = take(code, &mut pos, 2)?;
-    let op = Opcode::try_from(u16::from_be_bytes([raw[0], raw[1]]))?;
+    let mut v = u16::from_be_bytes([raw[0], raw[1]]);
+    if let Some(t) = inv {
+        v = t.get(v as usize).copied().unwrap_or(v);
+    }
+    let op = Opcode::try_from(v)?;
     let mut args = Vec::new();
     for k in operands(op) {
         args.push(match k {
@@ -340,10 +349,14 @@ pub fn encode(op: Opcode, args: &[Arg], width: Width, out: &mut Vec<u8>) -> Resu
 
 /// Decode a whole code section.
 pub fn decode_all(code: &[u8], width: Width) -> Result<Vec<Insn>, FormatError> {
+    decode_all_keyed(code, width, None)
+}
+
+pub fn decode_all_keyed(code: &[u8], width: Width, inv: Option<&[u16]>) -> Result<Vec<Insn>, FormatError> {
     let mut out = Vec::new();
     let mut pc = 0;
     while pc < code.len() {
-        let i = decode(code, pc, width)?;
+        let i = decode_keyed(code, pc, width, inv)?;
         pc = i.next;
         out.push(i);
     }

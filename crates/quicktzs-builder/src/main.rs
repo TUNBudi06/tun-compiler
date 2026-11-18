@@ -19,7 +19,7 @@ const USAGE: &str = "usage (distributor first run, in order):
      targets: x64-linux, arm64-linux, x64-termux, arm64-termux
 other commands:
   quicktzs build <dir> -o <out.qtz> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
-               [--compress] [--require-online] [--width 4|8] [--pak-version N (default 1)] [--unsigned]
+               [--compress] [--require-online] [--width 4|8] [--pak-version N (default 1)] [--unsigned] [--keyed]
                (without --identity, an identity.tzid next to this quicktzs binary is used)
   quicktzs inspect <x.qtz>
   quicktzs lib-check <lib.so>
@@ -176,7 +176,7 @@ fn keygen(args: &[String]) -> Result<(), BuildError> {
 fn build(args: &[String]) -> Result<(), BuildError> {
     let (mut dir, mut out, mut o) = (None, None, PackOptions { pak_version: 1, ..Default::default() });
     let mut server_config = None;
-    let (mut identity, mut master, mut unsigned, mut encrypt) = (None, None, false, false);
+    let (mut identity, mut master, mut unsigned, mut encrypt, mut keyed) = (None, None, false, false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = |n: &str| it.next().cloned().ok_or_else(|| BuildError::Msg(format!("{n} needs a value")));
@@ -189,6 +189,7 @@ fn build(args: &[String]) -> Result<(), BuildError> {
             "--compress" => o.compress = true,
             "--require-online" => o.require_online = true,
             "--unsigned" => unsigned = true,
+            "--keyed" => keyed = true,
             "--pak-version" => o.pak_version = v("--pak-version")?.parse().map_err(|_| BuildError::Msg("--pak-version must be a number".into()))?,
             "--width" => {
                 o.width = match v("--width")?.as_str() {
@@ -226,8 +227,14 @@ fn build(args: &[String]) -> Result<(), BuildError> {
                 o.key_mode = quicktzs_format::types::KeyMode::Server;
             }
             o.sign = Some(keys::signing_key(&id, &passphrase(false)?)?);
+            // SPEC-GAP: spec/09 §1.4 keys every build of a seeded identity, but keygen now always writes a seed,
+            // which would make every signed build unrunnable on the generic executor; keying is opt-in.
+            if keyed {
+                o.op_seed = Some(id.op_seed.ok_or_else(|| BuildError::Msg("--keyed needs an identity with an op_seed (run keygen)".into()))?);
+            }
         }
         None if server_config.is_some() => return msg("--server-config needs an identity (app_id must match)"),
+        None if keyed => return msg("--keyed needs a signing identity"),
         None if unsigned => eprintln!("warning: unsigned pak — only a --dev executor will run it"),
         None => return msg("no --identity given; pass --identity <identity.tzid> to sign, or --unsigned for a dev-only pak"),
     }

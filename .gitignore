@@ -4,3 +4,4 @@ target/
 *.key
 identity.tzid
 .serena/
+.claude/

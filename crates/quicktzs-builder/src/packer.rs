@@ -66,11 +66,13 @@ pub struct PackOptions {
     pub master_key: Option<Secret>,
     /// zstd-compress entries when that makes them smaller.
     pub compress: bool,
+    /// Keyed opcodes (spec/09 §1): rewrite every opcode to sigma(op) and set GFLAG_OP_KEYED.
+    pub op_seed: Option<[u8; 32]>,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { app_id: 0, author_id: 0, pak_version: 0, key_mode: KeyMode::None, build_time: None, width: Width::W4, dev: false, require_online: false, sign: None, master_key: None, compress: false }
+        PackOptions { app_id: 0, author_id: 0, pak_version: 0, key_mode: KeyMode::None, build_time: None, width: Width::W4, dev: false, require_online: false, sign: None, master_key: None, compress: false, op_seed: None }
     }
 }
 
@@ -322,6 +324,9 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
     }
     let TunOutput { file: mut tun, perms } = compiled.map_err(BuildError::Compile)?;
     tun.header.width = opts.width;
+    if let Some(seed) = &opts.op_seed {
+        quicktzs_format::opmap::key_code(&mut tun.code, opts.width, seed)?;
+    }
     let mut tun_bytes = Vec::new();
     tun.serialize(&mut tun_bytes)?;
 
@@ -373,8 +378,12 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
                 table.push(p);
             }
         }
+        let mut file = o.file;
+        if let Some(seed) = &opts.op_seed {
+            quicktzs_format::opmap::key_code(&mut file.tun.code, opts.width, seed)?;
+        }
         let mut b = Vec::new();
-        o.file.serialize(&mut b)?;
+        file.serialize(&mut b)?;
         compiled_scripts[i] = Some(b);
     }
     if table.len() > MAX_PERMS {
@@ -433,7 +442,8 @@ pub fn pack_with(dir: &Path, opts: &PackOptions, hooks: &Hooks) -> Result<Vec<u8
             build_time,
             author_id,
             pubkey_id,
-            gflags: (if opts.dev { GFLAG_DEBUG } else { 0 }) | (if opts.require_online { GFLAG_REQUIRE_ONLINE } else { 0 }),
+            gflags: (if opts.dev { GFLAG_DEBUG } else { 0 }) | (if opts.require_online { GFLAG_REQUIRE_ONLINE } else { 0 })
+                | (if opts.op_seed.is_some() { GFLAG_OP_KEYED } else { 0 }),
             width: opts.width,
         },
         entries,

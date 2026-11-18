@@ -17,6 +17,7 @@ pub mod identity;
 pub mod layout;
 pub mod libfn;
 pub mod opcodes;
+pub mod opmap;
 pub mod operands;
 pub mod pak;
 pub mod stdlib;

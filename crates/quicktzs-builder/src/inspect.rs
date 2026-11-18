@@ -7,7 +7,7 @@ use quicktzs_format::libfn::LibTable;
 use quicktzs_format::pak::{split_signature, PakHeader};
 use quicktzs_format::tun::TunFile;
 use quicktzs_format::tzst::TzstFile;
-use quicktzs_format::types::{EntryType, ENTRY_COMPRESSED, ENTRY_ENCRYPTED, ENTRY_EXECUTABLE, TUN_COMPRESSED};
+use quicktzs_format::types::{GFLAG_OP_KEYED, EntryType, ENTRY_COMPRESSED, ENTRY_ENCRYPTED, ENTRY_EXECUTABLE, TUN_COMPRESSED};
 
 use crate::packer::BuildError;
 
@@ -61,7 +61,11 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
             }
         }
     }
-    if let Some(e) = d.entries.iter().find(|e| e.entry_type == EntryType::Tun) {
+    let keyed = x.gflags & GFLAG_OP_KEYED != 0;
+    if keyed {
+        let _ = writeln!(w, "\nkeyed opcodes (needs distributor executor to disassemble); disassembly skipped");
+    }
+    if let (false, Some(e)) = (keyed, d.entries.iter().find(|e| e.entry_type == EntryType::Tun)) {
         match plain(pak, e)? {
             None => {
                 let _ = writeln!(w, "\nmain.tun disassembly: <encrypted>");
@@ -92,6 +96,10 @@ pub fn inspect(pak: &[u8]) -> Result<String, BuildError> {
             let _ = writeln!(w, "\n{:?} <encrypted>", e.path);
             continue;
         };
+        if keyed {
+            let _ = writeln!(w, "\n{:?} keyed opcodes, disassembly skipped", e.path);
+            continue;
+        }
         let (t, _) = TzstFile::parse(&body)?;
         let _ = writeln!(w, "\n{:?} fn table ({}):", e.path, t.fns.len());
         for (id, f) in t.fns.iter().enumerate() {

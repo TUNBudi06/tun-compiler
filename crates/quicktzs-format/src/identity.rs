@@ -23,7 +23,13 @@ pub struct Identity {
     pub author_id: u32,
     pub pubkey_id: u8,
     pub keys: Vec<Key>,
+    /// Keyed-opcode seed (spec/09 §1.2). On disk: version >= 2 appends 32 bytes after `keys[]`;
+    /// version 1 files have none (= not keyed).
+    pub op_seed: Option<[u8; 32]>,
 }
+
+/// First tzid version that carries `op_seed`.
+pub const TZID_VERSION_OP_SEED: u8 = 2;
 
 impl Identity {
     pub fn parse(bytes: &[u8]) -> Result<(Self, usize), FormatError> {
@@ -46,11 +52,16 @@ impl Identity {
             let enc_priv = r.take(n, "enc_priv")?.to_vec();
             keys.push(Key { id, status, public_key, enc_priv });
         }
-        Ok((Identity { version, app_id, author_id, pubkey_id, keys }, r.pos))
+        let op_seed = if version >= TZID_VERSION_OP_SEED { Some(r.array("op_seed")?) } else { None };
+        Ok((Identity { version, app_id, author_id, pubkey_id, keys, op_seed }, r.pos))
     }
 
     pub fn serialize(&self, out: &mut Vec<u8>) -> Result<(), FormatError> {
         out.extend_from_slice(&MAGIC_TZID);
+        // the seed's presence is keyed off the version byte, so the two must agree
+        if self.op_seed.is_some() != (self.version >= TZID_VERSION_OP_SEED) {
+            return Err(FormatError::Invalid { what: "identity", detail: "op_seed present iff version >= 2".into() });
+        }
         out.push(self.version);
         out.extend_from_slice(&self.app_id.to_le_bytes());
         out.extend_from_slice(&self.author_id.to_le_bytes());
@@ -63,6 +74,9 @@ impl Identity {
             let n = u16::try_from(k.enc_priv.len()).map_err(|_| FormatError::TooLarge { what: "enc_priv" })?;
             out.extend_from_slice(&n.to_le_bytes());
             out.extend_from_slice(&k.enc_priv);
+        }
+        if let Some(seed) = &self.op_seed {
+            out.extend_from_slice(seed);
         }
         Ok(())
     }
@@ -149,7 +163,24 @@ mod tests {
                 Key { id: 0, status: KEY_REVOKED, public_key: [5; 32], enc_priv: ep.clone() },
                 Key { id: 1, status: KEY_ACTIVE, public_key: [6; 32], enc_priv: ep },
             ],
+            op_seed: None,
         }
+    }
+
+    #[test]
+    fn op_seed_roundtrip_and_v1_compat() {
+        let mut id = sample();
+        let mut v1 = vec![];
+        id.serialize(&mut v1).unwrap();
+        assert_eq!(Identity::parse(&v1).unwrap().0.op_seed, None);
+        id.version = TZID_VERSION_OP_SEED;
+        assert!(id.serialize(&mut vec![]).is_err());
+        id.op_seed = Some([9; 32]);
+        let mut o = vec![];
+        id.serialize(&mut o).unwrap();
+        assert_eq!(o.len(), v1.len() + 32);
+        assert_eq!(Identity::parse(&o).unwrap(), (id, o.len()));
+        assert!(Identity::parse(&o[..o.len() - 1]).is_err());
     }
 
     #[test]

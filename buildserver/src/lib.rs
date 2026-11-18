@@ -362,6 +362,7 @@ mod tests {
             author_id: 1,
             pubkey_id: 0,
             keys: vec![Key { id: 0, status: KEY_ACTIVE, public_key: [3; 32], enc_priv: vec![] }],
+            op_seed: None,
         }
     }
 

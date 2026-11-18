@@ -68,7 +68,7 @@ BEFORE parsing the dict or touching any entry.
 0x0F  8B  build_time     unix epoch seconds
 0x17  4B  author_id      distributor identity
 0x1B  1B  pubkey_id      which pubkey signed (for rotation)
-0x1C  2B  gflags         bit0=require_online bit1=debug
+0x1C  2B  gflags         bit0=require_online bit1=debug bit2=op_keyed (spec/09 §1)
 0x1D  1B  width          4 or 8 — ref width for whole pak
 0x1E  2B  entry_count
 0x20  ..  entries[]

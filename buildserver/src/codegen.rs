@@ -53,6 +53,17 @@ pub fn generated_keys_rs(
         (2, None) => return Err("key_mode 2 needs a server url".into()),
         _ => s.push_str("pub fn server_url() -> String { String::new() }\n"),
     }
+    match &identity.op_seed {
+        Some(seed) => {
+            let _ = write!(
+                s,
+                "pub fn op_seed() -> Option<[u8; 32]> {{\n    let b: &[u8] = obfstr::obfbytes!(&[{}]);\n    \
+                 let mut k = [0u8; 32];\n    k.copy_from_slice(b);\n    Some(k)\n}}\n",
+                bytes(seed)
+            );
+        }
+        None => s.push_str("pub fn op_seed() -> Option<[u8; 32]> { None }\n"),
+    }
     if key_mode > 2 {
         return Err("unknown key_mode".into());
     }
@@ -74,6 +85,7 @@ mod tests {
                 Key { id: 0, status: KEY_REVOKED, public_key: [0xab; 32], enc_priv: vec![] },
                 Key { id: 1, status: KEY_ACTIVE, public_key: [0x12; 32], enc_priv: vec![] },
             ],
+            op_seed: None,
         }
     }
 

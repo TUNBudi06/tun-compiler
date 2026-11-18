@@ -3,7 +3,7 @@
 use super::vars::Value;
 use crate::{ExecError, EXIT_ERROR};
 use std::collections::HashMap;
-use quicktzs_format::operands::{decode_all, loop_regions, Arg, Insn, LoopRegion, Src};
+use quicktzs_format::operands::{decode_all_keyed, loop_regions, Arg, Insn, LoopRegion, Src};
 use quicktzs_format::tun::Const;
 use quicktzs_format::tzst::FnInfo;
 use quicktzs_format::types::Width;
@@ -32,9 +32,9 @@ pub struct Program {
 const NOT_BOUNDARY: u32 = u32::MAX;
 
 impl Program {
-    pub fn build(consts: &[Const], code: &[u8], width: Width, fns: &[FnInfo]) -> Result<Program, ExecError> {
+    pub fn build(consts: &[Const], code: &[u8], width: Width, fns: &[FnInfo], inv: Option<&[u16]>) -> Result<Program, ExecError> {
         let bad = |m: String| ExecError::new(EXIT_ERROR, format!("malformed bytecode: {m}"));
-        let insns = decode_all(code, width).map_err(|e| bad(e.to_string()))?;
+        let insns = decode_all_keyed(code, width, inv).map_err(|e| bad(e.to_string()))?;
         let regions = loop_regions(&insns).map_err(|e| bad(e.to_string()))?;
         let mut off2idx = vec![NOT_BOUNDARY; code.len() + 1];
         for (i, insn) in insns.iter().enumerate() {
@@ -61,8 +61,8 @@ impl Program {
     }
 
     /// Program of a compiled .tzst, with its import table.
-    pub fn from_tzst(f: &quicktzs_format::tzst::TzstFile) -> Result<Program, ExecError> {
-        let mut p = Self::build(&f.tun.consts, &f.tun.code, f.tun.header.width, &f.fns)?;
+    pub fn from_tzst(f: &quicktzs_format::tzst::TzstFile, inv: Option<&[u16]>) -> Result<Program, ExecError> {
+        let mut p = Self::build(&f.tun.consts, &f.tun.code, f.tun.header.width, &f.fns, inv)?;
         p.imports = f.imports.clone();
         Ok(p)
     }

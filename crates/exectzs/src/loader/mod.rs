@@ -15,7 +15,7 @@ use quicktzs_format::dict::{Dict, Entry};
 use quicktzs_format::layout::PAK_HEADER_LEN;
 use quicktzs_format::pak::PakHeader;
 use quicktzs_format::tun::TunFile;
-use quicktzs_format::types::{Arch, EntryType, KeyMode, Platform, GFLAG_DEBUG, GFLAG_REQUIRE_ONLINE};
+use quicktzs_format::types::{Arch, EntryType, KeyMode, Platform, GFLAG_DEBUG, GFLAG_OP_KEYED, GFLAG_REQUIRE_ONLINE};
 use quicktzs_format::tzst::TzstFile;
 
 /// Highest format/executor generation this build understands.
@@ -28,6 +28,8 @@ pub struct Pak<'a> {
     trust: Trust,
     license: Option<String>,
     keys: crate::keysource::KeyCache,
+    /// raw -> canonical opcode table, built once per load, only for a keyed pak on its paired executor.
+    op_inv: Option<Box<[u16]>>,
 }
 
 fn bad(msg: impl Into<String>) -> ExecError {
@@ -80,6 +82,11 @@ impl<'a> Pak<'a> {
         if h.gflags & GFLAG_REQUIRE_ONLINE != 0 && !(h.key_mode == KeyMode::Server && trust.server_url.is_some()) {
             return Err(bad(ob!("pak requires an online key server (key_mode 2 with a server_url), which this executor lacks")));
         }
+        let keyed = h.gflags & GFLAG_OP_KEYED != 0;
+        if keyed && trust.op_seed.is_none() {
+            return Err(bad(ob!("this module was built for a specific executor (keyed opcodes); use that distributor's executor")));
+        }
+        let op_inv = trust.op_seed.filter(|_| keyed).map(|s| quicktzs_format::opmap::inverse_table(&s));
         let mut main_idx = None;
         let mut refs = HashSet::new();
         for (i, e) in dict.entries.iter().enumerate() {
@@ -95,7 +102,11 @@ impl<'a> Pak<'a> {
             }
         }
         let main_idx = main_idx.ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, "pak has no main.tun entry"))?;
-        Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default() })
+        Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default(), op_inv })
+    }
+
+    pub fn op_inv(&self) -> Option<&[u16]> {
+        self.op_inv.as_deref()
     }
 
     /// gflags bit1 (debug): verbose errors for this pak.
@@ -198,7 +209,7 @@ impl<'a> Services<'a> {
         if file.tun.header.width != self.pak.dict.header.width {
             return Err(format!("tzst '{}': width does not match the pak", e.path));
         }
-        let prog = Program::from_tzst(&file).map_err(|x| x.msg)?;
+        let prog = Program::from_tzst(&file, self.pak.op_inv()).map_err(|x| x.msg)?;
         let unit = Rc::new(ScriptUnit { file, prog });
         self.scripts.borrow_mut().insert(e.ref_id, unit.clone());
         Ok(unit)
@@ -310,7 +321,7 @@ mod tests {
         let p = pak(|d, _, _| d.gflags = GFLAG_DEBUG);
         let (h, _) = PakHeader::parse(&p).unwrap();
         let (dict, _) = Dict::parse(&p[h.dict_offset as usize..]).unwrap();
-        let pk = Pak { signed: &p, dict, main_idx: 0, trust: Trust::default(), license: None, keys: Default::default() };
+        let pk = Pak { signed: &p, dict, main_idx: 0, trust: Trust::default(), license: None, keys: Default::default(), op_inv: None };
         assert!(pk.debug());
     }
 }
