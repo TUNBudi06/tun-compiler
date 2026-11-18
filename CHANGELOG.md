@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-18
 
-### Added: `.text` self-hash + spread gate (`PENDING4`)
+### Added: `.text` self-hash + spread gate (`431f09b`)
 - **`.text` self-hash** (`spec/09` §2.3): `make-executor` stamps a SHA-256 of the executor's code
   section into the config slot (slot version 2). At startup (not `--dev`) the executor re-hashes its
   own `.text` from `/proc/self/exe` and refuses to run if it differs — catching a patched binary.
