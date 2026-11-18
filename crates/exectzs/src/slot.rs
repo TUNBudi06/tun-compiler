@@ -64,3 +64,8 @@ pub fn resolved_trust() -> Result<Trust, crate::ExecError> {
         Resolved::Corrupt => Err(crate::ExecError::new(crate::EXIT_ERROR, "integrity check failed")),
     }
 }
+
+/// `.text` hash stamped by make-executor (spec/09 2.3); `None` = unpatched or an older slot.
+pub fn text_hash() -> Option<[u8; 32]> {
+    SlotConfig::from_body(&read_slot()).ok().flatten().and_then(|c| c.text_hash)
+}

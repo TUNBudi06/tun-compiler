@@ -50,13 +50,17 @@ pub fn selftest() -> u8 {
 }
 
 pub fn verify<'a>(pak: &'a [u8], opts: &RunOptions, trust: &Trust) -> Result<Verified<'a>, ExecError> {
-    // Self-test gate; skipped under --dev so a distributor can debug.
-    let gate = if opts.dev { 0 } else { selftest() };
+    verify_with(pak, opts, trust, crate::integrity::token(opts.dev))
+}
+
+/// `gate` = integrity token (selftest | .text hash); skipped (0) under --dev so a distributor can debug.
+pub(crate) fn verify_with<'a>(pak: &'a [u8], opts: &RunOptions, trust: &Trust, gate: u8) -> Result<Verified<'a>, ExecError> {
     if gate != 0 {
         return Err(refuse(ob!("integrity check failed")));
     }
     let r = verify_inner(pak, opts, trust)?;
-    let n = r.signed.len().saturating_sub(gate as usize); // gate==0 normally; see selftest doc
+    // hardening: site 1 - token also shortens the signed slice, so removing only the abort above still breaks later.
+    let n = r.signed.len().saturating_sub(gate as usize);
     Ok(Verified { signed: &r.signed[..n], ..r })
 }
 

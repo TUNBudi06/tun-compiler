@@ -30,6 +30,8 @@ pub struct Pak<'a> {
     keys: crate::keysource::KeyCache,
     /// raw -> canonical opcode table, built once per load, only for a keyed pak on its paired executor.
     op_inv: Option<Box<[u16]>>,
+    /// Integrity token (0 = intact); see `integrity`.
+    pub(crate) tok: u8,
 }
 
 fn bad(msg: impl Into<String>) -> ExecError {
@@ -102,7 +104,7 @@ impl<'a> Pak<'a> {
             }
         }
         let main_idx = main_idx.ok_or_else(|| ExecError::new(EXIT_NOT_FOUND, "pak has no main.tun entry"))?;
-        Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default(), op_inv })
+        Ok(Pak { signed, dict, main_idx, trust: trust.clone(), license: crate::keysource::license_from(opts), keys: Default::default(), op_inv, tok: crate::integrity::token(opts.dev) })
     }
 
     pub fn op_inv(&self) -> Option<&[u16]> {
@@ -142,7 +144,12 @@ impl<'a> Pak<'a> {
     }
     /// The entry's original bytes: hash -> decrypt -> decompress -> size check (spec/01).
     pub fn data(&self, e: &Entry) -> Result<Vec<u8>, ExecError> {
-        crypto::open_entry(e, self.stored(e), &self.dict.header, &self.trust, self.license.as_deref(), &self.keys)
+        let mut d = crypto::open_entry(e, self.stored(e), &self.dict.header, &self.trust, self.license.as_deref(), &self.keys)?;
+        // hardening: site 2 - a non-zero integrity token corrupts the first decrypted byte of every entry.
+        if let Some(b) = d.first_mut() {
+            *b ^= self.tok;
+        }
+        Ok(d)
     }
     pub fn tun(&self) -> Result<TunFile, ExecError> {
         let e = &self.dict.entries[self.main_idx];
@@ -317,11 +324,29 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_integrity_token_corrupts_entry_data_and_verify() {
+        let p = pak(|_, _, _| {});
+        let (h, _) = PakHeader::parse(&p).unwrap();
+        let (dict, _) = Dict::parse(&p[h.dict_offset as usize..]).unwrap();
+        let mk = |tok| Pak { signed: &p, dict: dict.clone(), main_idx: 0, trust: Trust::default(), license: None, keys: Default::default(), op_inv: None, tok };
+        let (good, bad) = (mk(0), mk(5));
+        let e = &good.dict.entries[0];
+        let (a, b) = (good.data(e).unwrap(), bad.data(e).unwrap());
+        assert_ne!(a, b); // site 2 bites: decrypt output differs
+        assert!(good.tun().is_ok());
+        assert!(bad.tun().is_err());
+        // site 1 bites: verify refuses a non-zero token even for a valid dev pak
+        let o = RunOptions { dev: true, ..Default::default() };
+        assert!(crate::verify::verify_with(&p, &o, &Trust::default(), 0).is_ok());
+        assert!(crate::verify::verify_with(&p, &o, &Trust::default(), 5).is_err());
+    }
+
+    #[test]
     fn debug_flag_exposed() {
         let p = pak(|d, _, _| d.gflags = GFLAG_DEBUG);
         let (h, _) = PakHeader::parse(&p).unwrap();
         let (dict, _) = Dict::parse(&p[h.dict_offset as usize..]).unwrap();
-        let pk = Pak { signed: &p, dict, main_idx: 0, trust: Trust::default(), license: None, keys: Default::default(), op_inv: None };
+        let pk = Pak { signed: &p, dict, main_idx: 0, trust: Trust::default(), license: None, keys: Default::default(), op_inv: None, tok: 0 };
         assert!(pk.debug());
     }
 }

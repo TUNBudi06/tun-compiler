@@ -4,6 +4,7 @@
 
 pub mod antiattach;
 pub mod crypto;
+pub mod integrity;
 pub mod keysource;
 pub mod loader;
 pub mod perm;
@@ -189,7 +190,9 @@ fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io)
         return Ok((code, vm.env.last_exit));
     }
     let tun = pak.tun()?;
-    let prog = vm::program::Program::build(&tun.consts, &tun.code, tun.header.width, &[], pak.op_inv())?;
+    // hardening: site 3 - a non-zero integrity token truncates the launcher bytecode.
+    let code = &tun.code[..tun.code.len().saturating_sub(pak.tok as usize)];
+    let prog = vm::program::Program::build(&tun.consts, code, tun.header.width, &[], pak.op_inv())?;
     let mut vm = vm::interp::Vm::launcher(&prog, &svc, io);
     let code = vm.run_launcher()?;
     Ok((code, vm.env.last_exit))

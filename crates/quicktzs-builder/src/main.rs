@@ -155,8 +155,11 @@ fn make_executor(args: &[String]) -> Result<(), BuildError> {
         master_key: master,
         server_url: server.cloned().unwrap_or_default(),
         pubkeys: id.keys.iter().map(|k| (k.id, k.public_key, k.status != 0)).collect(),
+        text_hash: None,
     };
     let mut bin = std::fs::read(tpl).map_err(|e| BuildError::Io(format!("cannot read {tpl}: {e}")))?;
+    // .text is not the slot's section, so hashing it before patching is the same as after. Non-ELF template: no check.
+    let cfg = quicktzs_format::slot::SlotConfig { text_hash: quicktzs_format::slot::text_hash(&bin), ..cfg };
     quicktzs_format::slot::patch(&mut bin, &cfg)?;
     quicktzs_builder::packer::write_atomic_mode(Path::new(out), &bin, Some(0o755))?;
     println!("wrote {out} (key_mode {mode}, app_id {}, {} key(s){})", id.app_id, cfg.pubkeys.len(), if cfg.op_seed.is_some() { ", op_seed" } else { "" });

@@ -175,3 +175,93 @@ fn key_mode_2_patched_executor_with_real_key_server() {
     assert!(ok.status.success() && String::from_utf8_lossy(&ok.stdout).contains("secret-ok"), "{}", err(&ok));
     assert!(!run("wrong-license").status.success());
 }
+
+// ---- spec/09 2.3 .text self-hash ----
+
+fn slot_cfg(bin: &[u8]) -> quicktzs_format::slot::SlotConfig {
+    let at = find_slot(bin).unwrap();
+    quicktzs_format::slot::SlotConfig::from_body(&bin[at + SLOT_MAGIC.len()..at + quicktzs_format::slot::SLOT_SIZE]).unwrap().unwrap()
+}
+
+fn patched(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let (_, idp) = new_id(tag);
+    let id = keys::load_identity(&idp).unwrap();
+    let pak = module(false, &id);
+    let out = tmp(tag).join("player");
+    let o = make(&template(), &idp, &out, &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    (idp, pak, out)
+}
+
+#[test]
+fn text_hash_stamped_outside_slot_and_matches_runtime_bytes() {
+    let (_, pak, out) = patched("th");
+    let b = fs::read(&out).unwrap();
+    let r = quicktzs_format::slot::elf_text_range(&b).unwrap();
+    let at = find_slot(&b).unwrap();
+    assert!(at + 2048 <= r.start || at >= r.end, "config slot must not live in .text");
+    assert_eq!(slot_cfg(&b).text_hash, quicktzs_format::slot::text_hash(&b));
+    assert!(slot_cfg(&b).text_hash.is_some());
+    // the executor re-reads /proc/self/exe and the hashes agree: the real release binary runs
+    let r = exec(&out, &pak);
+    assert!(r.status.success(), "{}", err(&r));
+}
+
+#[test]
+fn flipped_text_byte_refuses() {
+    let (_, pak, out) = patched("tf");
+    let mut b = fs::read(&out).unwrap();
+    let r = quicktzs_format::slot::elf_text_range(&b).unwrap();
+    b[r.end - 1] ^= 1;
+    fs::write(&out, b).unwrap();
+    let r = exec(&out, &pak);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(err(&r).contains("integrity check failed"), "{}", err(&r));
+}
+
+#[test]
+fn flipped_stored_text_hash_refuses() {
+    let (_, pak, out) = patched("ts");
+    let mut b = fs::read(&out).unwrap();
+    // inside the checksummed payload (1 key: text hash sits at payload offset ~115..148)
+    let at = find_slot(&b).unwrap() + SLOT_MAGIC.len() + 130;
+    b[at] ^= 1;
+    fs::write(&out, b).unwrap();
+    let r = exec(&out, &pak);
+    assert!(!r.status.success() && err(&r).contains("integrity check failed"), "{}", err(&r));
+}
+
+#[test]
+fn slot_without_text_hash_still_runs_and_tamper_goes_unchecked() {
+    let (_, pak, out) = patched("tn");
+    let mut b = fs::read(&out).unwrap();
+    let mut cfg = slot_cfg(&b);
+    cfg.text_hash = None;
+    quicktzs_format::slot::patch(&mut b, &cfg).unwrap();
+    fs::write(&out, &b).unwrap();
+    let r = exec(&out, &pak);
+    assert!(r.status.success(), "{}", err(&r));
+}
+
+#[test]
+fn dev_skips_text_hash() {
+    // no pubkeys => --dev allowed; wrong text_hash is ignored under --dev, enforced without it
+    let (_, _, out) = patched("td");
+    let d = tmp("td-mod");
+    fs::create_dir_all(d.join("scripts")).unwrap();
+    fs::write(d.join("main.tun"), r#"START { set @0 = "x"; } MAIN { run "scripts/main"; }"#).unwrap();
+    fs::write(d.join("scripts/main.tzst"), "start { print \"ok\"; }\n").unwrap();
+    let pak = d.join("u.qtz");
+    fs::write(&pak, pack_module(&d, &PackOptions { build_time: Some(1), ..Default::default() }).unwrap()).unwrap();
+    let mut b = fs::read(&out).unwrap();
+    let mut cfg = slot_cfg(&b);
+    cfg.pubkeys.clear();
+    (cfg.app_id, cfg.author_id) = (0, 0);
+    cfg.text_hash = Some([1; 32]);
+    quicktzs_format::slot::patch(&mut b, &cfg).unwrap();
+    fs::write(&out, &b).unwrap();
+    let dev = Command::new(&out).args(["--dev", "--yes"]).arg(&pak).output().unwrap();
+    assert!(dev.status.success(), "{}", err(&dev));
+    let rel = exec(&out, &pak);
+    assert!(!rel.status.success() && err(&rel).contains("integrity check failed"), "{}", err(&rel));
+}

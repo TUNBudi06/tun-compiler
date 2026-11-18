@@ -10,7 +10,9 @@ use crate::{FormatError, Reader};
 pub const SLOT_MAGIC: [u8; 8] = [0x51, 0x54, 0x5A, 0xC0, 0x4E, 0xF1, 0x9B, 0x2D];
 pub const SLOT_SIZE: usize = 2048;
 pub const SLOT_BODY: usize = SLOT_SIZE - SLOT_MAGIC.len();
-pub const SLOT_VERSION: u8 = 1;
+/// v1 = no text_hash; v2 appends `text_present:1 text_hash:32` before the checksum. A config without a
+/// text_hash is still written as v1 so older executors keep accepting it.
+pub const SLOT_VERSION: u8 = 2;
 pub const MAX_PUBKEYS: usize = 16;
 pub const MAX_SERVER_URL: usize = 512;
 /// `flags` bit 0: the distributor requires online key checks (reserved; not interpreted yet).
@@ -31,6 +33,8 @@ pub struct SlotConfig {
     pub server_url: String,
     /// (id, public key, revoked)
     pub pubkeys: Vec<(u8, [u8; 32], bool)>,
+    /// SHA-256 of the executor's `.text` (spec/09 2.3), stamped by make-executor; `None` = no check.
+    pub text_hash: Option<[u8; 32]>,
 }
 
 fn mask(buf: &mut [u8]) {
@@ -53,7 +57,8 @@ impl SlotConfig {
         if self.pubkeys.len() > MAX_PUBKEYS {
             return Err(FormatError::TooLarge { what: "pubkeys" });
         }
-        let mut p = vec![SLOT_VERSION, self.key_mode, self.flags];
+        let ver = if self.text_hash.is_some() { SLOT_VERSION } else { 1 };
+        let mut p = vec![ver, self.key_mode, self.flags];
         p.extend_from_slice(&self.app_id.to_le_bytes());
         p.extend_from_slice(&self.author_id.to_le_bytes());
         opt32(&mut p, &self.op_seed);
@@ -65,6 +70,9 @@ impl SlotConfig {
             p.push(*id);
             p.extend_from_slice(key);
             p.push(*revoked as u8);
+        }
+        if ver >= 2 {
+            opt32(&mut p, &self.text_hash);
         }
         let sum: [u8; 32] = Sha256::digest(&p).into();
         p.extend_from_slice(&sum);
@@ -94,7 +102,8 @@ impl SlotConfig {
         mask(&mut p);
         let bad = || FormatError::Invalid { what: "slot", detail: "corrupt".into() };
         let mut r = Reader::new(&p);
-        if r.u8("version")? != SLOT_VERSION {
+        let ver = r.u8("version")?;
+        if ver == 0 || ver > SLOT_VERSION {
             return Err(bad());
         }
         let (key_mode, flags, app_id, author_id) = (r.u8("key_mode")?, r.u8("flags")?, r.u32("app_id")?, r.u32("author_id")?);
@@ -117,13 +126,44 @@ impl SlotConfig {
         for _ in 0..count {
             pubkeys.push((r.u8("id")?, r.array::<32>("key")?, r.u8("revoked")? == 1));
         }
+        let text_hash = if ver >= 2 { opt(&mut r)? } else { None };
         let end = r.pos;
         let sum = r.array::<32>("checksum")?;
         if <[u8; 32]>::from(Sha256::digest(&p[..end])) != sum {
             return Err(bad());
         }
-        Ok(Some(SlotConfig { key_mode, flags, app_id, author_id, op_seed, master_key, server_url, pubkeys }))
+        Ok(Some(SlotConfig { key_mode, flags, app_id, author_id, op_seed, master_key, server_url, pubkeys, text_hash }))
     }
+}
+
+/// File range of the `.text` section of an ELF64 little-endian binary (None if not one / malformed).
+/// Hand-parsed section headers; shared so make-executor and the executor hash the same bytes.
+pub fn elf_text_range(b: &[u8]) -> Option<std::ops::Range<usize>> {
+    let u16 = |o: usize| b.get(o..o + 2).map(|x| u16::from_le_bytes(x.try_into().unwrap()) as usize);
+    let u32 = |o: usize| b.get(o..o + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap()) as usize);
+    let u64 = |o: usize| b.get(o..o + 8).and_then(|x| usize::try_from(u64::from_le_bytes(x.try_into().unwrap())).ok());
+    if b.get(..6)? != &[0x7f, b'E', b'L', b'F', 2, 1] {
+        return None;
+    }
+    let (shoff, ent, num, strndx) = (u64(0x28)?, u16(0x3A)?, u16(0x3C)?, u16(0x3E)?);
+    let sh = |i: usize| shoff.checked_add(i.checked_mul(ent)?);
+    let strtab = sh(strndx)?;
+    let str_off = u64(strtab + 0x18)?;
+    for i in 0..num {
+        let h = sh(i)?;
+        let name = str_off.checked_add(u32(h)?)?;
+        if b.get(name..name.checked_add(6)?)? == b".text\0" {
+            let (off, size) = (u64(h + 0x18)?, u64(h + 0x20)?);
+            let end = off.checked_add(size)?;
+            return (end <= b.len()).then_some(off..end);
+        }
+    }
+    None
+}
+
+/// SHA-256 of the `.text` section bytes of an ELF binary.
+pub fn text_hash(bin: &[u8]) -> Option<[u8; 32]> {
+    Some(Sha256::digest(&bin[elf_text_range(bin)?]).into())
 }
 
 /// Offset of the (single) slot magic in a template binary.
@@ -161,6 +201,7 @@ mod tests {
             master_key: Some([4; 32]),
             server_url: "http://x.example".into(),
             pubkeys: vec![(1, [5; 32], false), (2, [6; 32], true)],
+            text_hash: Some([8; 32]),
         }
     }
 
@@ -178,6 +219,25 @@ mod tests {
                 assert!(r.is_err(), "flip at {i} accepted");
             }
         }
+    }
+
+    #[test]
+    fn v1_payload_without_text_hash_still_parses() {
+        let mut c = cfg();
+        c.text_hash = None;
+        let b = c.to_body().unwrap();
+        let mut p = b.to_vec();
+        mask(&mut p);
+        assert_eq!(p[0], 1);
+        assert_eq!(SlotConfig::from_body(&b).unwrap(), Some(c));
+    }
+
+    #[test]
+    fn elf_text_range_of_self() {
+        let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let r = elf_text_range(&exe).expect("test binary is ELF");
+        assert!(!r.is_empty() && r.end <= exe.len());
+        assert!(elf_text_range(&[0; 100]).is_none());
     }
 
     #[test]

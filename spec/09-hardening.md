@@ -129,12 +129,28 @@ path, not a single call that is easy to skip.
 - Both are easy to bypass (LD_PRELOAD, patch) — they only raise the bar. Off by default is not
   offered; they run in release (non-dev) builds and are skipped under `--dev`.
 
-### 2.3 Optional .text integrity (best-effort)
+### 2.3 `.text` self-hash (built)
 
-Where feasible, hash the mapped `.text` of the verify functions at startup and compare to a value
-the build patches in. Because the recompiled binary makes post-link patching awkward, this is
-**optional** and secondary to §2.1; §2.1 catches the main attack without it. Not frozen into the
-format.
+At startup (release, not `--dev`) the executor SHA-256s its own ELF `.text` section (re-read from
+`/proc/self/exe`) and compares to a hash `make-executor` stamped into the config slot (§4.2, slot
+version 2). Mismatch, or `/proc/self/exe` unreadable while a hash is stamped, ⇒ refuse (fail-closed,
+unix only). The slot lives in `.rodata`, so patching keys never changes `.text`; the stored hash is
+in the slot, not `.text`, so it does not hash itself. An executor with no stamped hash does no
+check (back-compat). `elf_text_range`/`text_hash` are shared in `quicktzs-format/src/slot.rs` so the
+patcher and the executor hash the same bytes. ELF-only (Linux/Termux); a PE build would need a PE
+parser.
+
+### 2.5 Spread gate (built)
+
+The integrity result is not one skippable branch. `integrity::compute() -> u8` (0 = ok) combines the
+§2.1 self-test and the §2.3 `.text` check, cached in a `OnceLock`, always 0 under `--dev`. A non-zero
+token is folded into three sites so removing any one still corrupts real output, not just a check:
+1. `verify_with` refuses a non-zero token and subtracts it from the signed-slice length;
+2. `Pak::data` XORs the token into the first decrypted byte of every entry;
+3. `run_inner_io` truncates the launcher bytecode by `tok` bytes before `Program::build`.
+Nothing is added to the per-instruction dispatch loop. **Residual:** all three read one cached token,
+so a patch forcing `compute()` to return 0 defeats all three — the same ceiling as any software
+integrity check on a binary the attacker holds.
 
 ### 2.4 Boundaries
 

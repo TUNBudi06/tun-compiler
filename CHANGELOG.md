@@ -6,6 +6,19 @@ existing modules build or run.
 
 ## 2026-11-18
 
+### Added: `.text` self-hash + spread gate (`PENDING4`)
+- **`.text` self-hash** (`spec/09` §2.3): `make-executor` stamps a SHA-256 of the executor's code
+  section into the config slot (slot version 2). At startup (not `--dev`) the executor re-hashes its
+  own `.text` from `/proc/self/exe` and refuses to run if it differs — catching a patched binary.
+  The slot is in `.rodata`, so patching keys never changes `.text`. ELF/Linux only; back-compatible
+  (no stamped hash = no check).
+- **Spread gate** (`spec/09` §2.5): the integrity result (self-test + `.text` hash) is folded into
+  three places — `verify_with` (signed-slice length), `Pak::data` (first decrypted byte of each
+  entry), and the launcher bytecode length — so removing any one check still breaks real output, not
+  just skips a branch. Nothing added to the dispatch hot loop. Residual: one cached token source.
+- **Compatibility:** none for modules. A patched executor from an older `make-executor` (slot v1, no
+  hash) still runs.
+
 ### Changed: executors are patched, not recompiled. Removed the build-server `/build` (`bc2b6a1`)
 - **`quicktzs make-executor`** stamps your keys into a prebuilt `exectzs`: a reserved 2048-byte
   config slot (magic + XOR-masked, SHA-256-checksummed payload) holds the pubkey(s), `op_seed`,
