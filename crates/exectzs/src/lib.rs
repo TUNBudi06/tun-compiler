@@ -2,6 +2,7 @@
 //! A library so the builder's `quicktzs dev run` and integration tests share the exact VM;
 //! `main.rs` is the thin shipped binary.
 
+pub mod antiattach;
 pub mod crypto;
 pub mod generated_keys;
 pub mod keysource;

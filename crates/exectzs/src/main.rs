@@ -27,6 +27,10 @@ fn main() {
         eprintln!("{}", ob!("error: this executor was built for distribution: --dev is not available"));
         std::process::exit(1);
     }
+    if !dev && exectzs::antiattach::check().is_err() {
+        eprintln!("{}", ob!("error: integrity check failed"));
+        std::process::exit(1);
+    }
     exectzs::sandbox::install_signal_cleanup();
     let pak = args.remove(0);
     let opts = exectzs::RunOptions { dev, assume_yes: yes, license, args, ..Default::default() };
