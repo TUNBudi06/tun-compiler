@@ -20,6 +20,7 @@ pub mod opcodes;
 pub mod opmap;
 pub mod operands;
 pub mod pak;
+pub mod slot;
 pub mod stdlib;
 pub mod tun;
 pub mod types;

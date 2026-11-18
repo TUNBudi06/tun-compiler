@@ -17,6 +17,8 @@ const USAGE: &str = "usage (distributor first run, in order):
                          [--master-key <master.key> | --server-config <server.tsrv>]
                          [--build-token <file>]   (else env QUICKTZS_BUILD_TOKEN)
      targets: x64-linux, arm64-linux, x64-termux, arm64-termux
+  5b. quicktzs make-executor --template <exectzs> -i <identity.tzid> [--key-mode 0|1|2] [--master-key <hex|file> | --server <url>] -o <out>
+                         (patches the config slot of a prebuilt executor: no cargo, no network; key-mode defaults to 1 with --master-key, 2 with --server, else 0)
 other commands:
   quicktzs build <dir> -o <out.qtz> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
                [--compress] [--require-online] [--width 4|8] [--pak-version N (default 1)] [--unsigned] [--keyed]
@@ -138,6 +140,53 @@ fn gen_executor(args: &[String]) -> Result<i32, BuildError> {
     };
     let ok = distrib::gen_executor(Path::new(id), server, distrib::parse_targets(t)?, Path::new(out), master, tsrv, token)?;
     Ok(if ok { 0 } else { 1 })
+}
+
+fn make_executor(args: &[String]) -> Result<(), BuildError> {
+    let m = flags(args, &["--template", "-i", "--key-mode", "--master-key", "--server", "-o"], &[])?;
+    let (Some(tpl), Some(idp), Some(out)) = (m.get("--template"), m.get("-i"), m.get("-o")) else {
+        return msg("usage: quicktzs make-executor --template <exectzs> -i <identity.tzid> [--key-mode 0|1|2] [--master-key <hex|file> | --server <url>] -o <out>");
+    };
+    let id = keys::load_identity(Path::new(idp))?;
+    let master = match m.get("--master-key") {
+        None => None,
+        Some(v) if Path::new(v).is_file() => Some(keys::read_master_key(Path::new(v))?.0),
+        Some(v) => Some(parse_hex32(v)?),
+    };
+    let server = m.get("--server");
+    let mode: u8 = match num(&m, "--key-mode")? {
+        Some(k) => k,
+        None => if master.is_some() { 1 } else if server.is_some() { 2 } else { 0 },
+    };
+    if master.is_some() && server.is_some() {
+        return msg("give --master-key or --server, not both");
+    }
+    match (mode, master.is_some(), server.is_some()) {
+        (0, false, false) | (1, true, false) | (2, false, true) => {}
+        (0..=2, ..) => return msg(format!("--key-mode {mode} needs {}", ["no --master-key/--server", "--master-key", "--server"][mode as usize])),
+        _ => return msg("--key-mode must be 0, 1 or 2"),
+    }
+    let cfg = quicktzs_format::slot::SlotConfig {
+        key_mode: mode,
+        flags: 0,
+        app_id: id.app_id,
+        author_id: id.author_id,
+        op_seed: id.op_seed,
+        master_key: master,
+        server_url: server.cloned().unwrap_or_default(),
+        pubkeys: id.keys.iter().map(|k| (k.id, k.public_key, k.status != 0)).collect(),
+    };
+    let mut bin = std::fs::read(tpl).map_err(|e| BuildError::Io(format!("cannot read {tpl}: {e}")))?;
+    quicktzs_format::slot::patch(&mut bin, &cfg)?;
+    quicktzs_builder::packer::write_atomic_mode(Path::new(out), &bin, Some(0o755))?;
+    println!("wrote {out} (key_mode {mode}, app_id {}, {} key(s){})", id.app_id, cfg.pubkeys.len(), if cfg.op_seed.is_some() { ", op_seed" } else { "" });
+    Ok(())
+}
+
+fn parse_hex32(s: &str) -> Result<[u8; 32], BuildError> {
+    let ok = s.len() == 64 && s.is_ascii();
+    let v: Option<Vec<u8>> = ok.then(|| (0..32).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()).flatten();
+    v.and_then(|v| v.try_into().ok()).ok_or_else(|| BuildError::Msg("--master-key must be an existing file or 64 hex characters".into()))
 }
 
 fn keygen(args: &[String]) -> Result<(), BuildError> {
@@ -287,6 +336,7 @@ fn main() {
         Some("setup-server") => setup_server(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("setup-user") => setup_user(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("gen-generator") => gen_generator(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("make-executor") => make_executor(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("gen-executor") => exit(gen_executor(&args[1..]).unwrap_or_else(|e| fail(e))),
         Some(_) => {
             eprintln!("{USAGE}");

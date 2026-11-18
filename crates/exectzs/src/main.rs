@@ -23,7 +23,12 @@ fn main() {
         eprintln!("usage: exectzs [--dev] [--yes] [--license <text>] <module.qtz> [args...]");
         std::process::exit(exectzs::EXIT_MISUSE);
     }
-    if dev && !exectzs::dev_allowed(exectzs::generated_keys::PUBKEYS) {
+    let trust = exectzs::slot::resolved_trust().unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1)
+    });
+    let keys: Vec<_> = trust.keys.iter().map(|k| (k.id, k.public, k.revoked)).collect();
+    if dev && !exectzs::dev_allowed(&keys) {
         eprintln!("{}", ob!("error: this executor was built for distribution: --dev is not available"));
         std::process::exit(1);
     }

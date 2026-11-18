@@ -10,6 +10,7 @@ pub mod loader;
 pub mod perm;
 pub mod platform;
 pub mod sandbox;
+pub mod slot;
 pub mod stdlib;
 pub mod verify;
 pub mod vm;
@@ -36,7 +37,7 @@ pub struct RunOptions {
     pub mem_limit: Option<u64>,
     /// Budget of the ON_EXIT handler (default 5 s).
     pub on_exit_timeout_ms: Option<u64>,
-    /// Trusted identity/keys. `None` = the constants compiled in from `generated_keys.rs`.
+    /// Trusted identity/keys. `None` = the executor's resolved config (patched slot, else `generated_keys.rs`).
     pub trust: Option<Trust>,
     /// Auto-approve the manifest and every RUN prompt (tests, `--yes`).
     pub assume_yes: bool,
@@ -70,18 +71,10 @@ pub struct Trust {
 }
 
 impl Trust {
-    /// The values the build server compiled in (`generated_keys.rs`).
+    /// The executor's resolved config: patched slot, else `generated_keys`, else blank (see `slot`).
+    /// A corrupt slot yields a blank trust here; `run_inner_io` refuses outright via `slot::resolved_trust`.
     pub fn compiled() -> Trust {
-        use generated_keys as g;
-        Trust {
-            app_id: g::APP_ID,
-            author_id: g::AUTHOR_ID,
-            keys: g::PUBKEYS.iter().map(|&(id, public, revoked)| TrustedKey { id, public, revoked }).collect(),
-            master_key: g::master_key(),
-            key_mode: g::KEY_MODE,
-            server_url: Some(g::server_url()).filter(|u| !u.is_empty()),
-            op_seed: g::op_seed(),
-        }
+        slot::resolved_trust().unwrap_or_default()
     }
 }
 
@@ -160,7 +153,10 @@ pub fn run_tzst(file: &quicktzs_format::tzst::TzstFile, opts: &RunOptions, io: &
 /// Returns (exit code, final `$?`). Order matters (invariant 4): signature -> parse -> checks ->
 /// approval -> run. Entry hashes/decryption happen lazily inside `Pak::data`, hash first.
 fn run_inner_io(pak: &[u8], opts: &RunOptions, entry: Option<&str>, io: &mut Io) -> Result<(i32, i32), ExecError> {
-    let trust = opts.trust.clone().unwrap_or_else(Trust::compiled);
+    let trust = match &opts.trust {
+        Some(t) => t.clone(),
+        None => slot::resolved_trust()?,
+    };
     // 1+2: split, then Ed25519 verify. Nothing is parsed before this returns.
     let verified = verify::verify(pak, opts, &trust)?;
     // 3: only now parse PakHeader + Dict and check identity/version/bounds.
