@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-18
 
-### Changed: executors are patched, not recompiled. Removed the build-server `/build` (`PENDING3`)
+### Changed: executors are patched, not recompiled. Removed the build-server `/build` (`bc2b6a1`)
 - **`quicktzs make-executor`** stamps your keys into a prebuilt `exectzs`: a reserved 2048-byte
   config slot (magic + XOR-masked, SHA-256-checksummed payload) holds the pubkey(s), `op_seed`,
   key mode and master key / server URL. No recompile, no Rust toolchain, no source — works on any
