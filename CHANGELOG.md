@@ -6,7 +6,7 @@ existing modules build or run.
 
 ## 2026-11-18
 
-### Added: executor hardening — keyed opcodes + verify self-defense (`PENDING2`)
+### Added: executor hardening — keyed opcodes + verify self-defense (`db9928e`)
 - **Keyed opcode map** (`spec/09` §1, gen-executor only): `quicktzs build --keyed` scrambles the
   2-byte opcode numbers with a secret 32-byte `op_seed` from `identity.tzid`, different per
   distributor. The paired executor (seed embedded via `gen-executor`) un-scrambles with a table
