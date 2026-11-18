@@ -6,6 +6,25 @@ existing modules build or run.
 
 ## 2026-11-18
 
+### Added: executor hardening — keyed opcodes + verify self-defense (`PENDING2`)
+- **Keyed opcode map** (`spec/09` §1, gen-executor only): `quicktzs build --keyed` scrambles the
+  2-byte opcode numbers with a secret 32-byte `op_seed` from `identity.tzid`, different per
+  distributor. The paired executor (seed embedded via `gen-executor`) un-scrambles with a table
+  built once at pak load, so dispatch speed is unchanged. A keyed module runs only on its own
+  executor; a generic executor refuses it with a clear message. Plain `quicktzs build` and the
+  generic `exectzs` stay canonical, so testing and `inspect` are unaffected.
+  - `identity.tzid` is now version 2 (32-byte seed appended); version 1 files still load (no seed).
+  - New dict gflags bit 2 (`GFLAG_OP_KEYED`). `min_exec_ver` stays 1.
+- **Verify self-defense** (`spec/09` §2): at startup (skipped under `--dev`) the executor runs its
+  real signature check against a known-good and a one-bit-flipped-bad vector plus a SHA-256 vector,
+  and refuses to run if the check is wrong — so patching verify to "always pass" makes the bad
+  vector pass and aborts. The pass/fail value is folded into the signed-data length, so deleting the
+  abort still hands the parser a truncated slice. Plus `TracerPid`/`PR_SET_DUMPABLE` anti-attach
+  (release only). Both are speed bumps on open platforms, not walls.
+- **Compatibility:** a keyed module needs its paired executor. Non-keyed builds and the generic
+  executor are unaffected.
+
+
 ### Faster: read cache, findloc, superinstructions. CI release builds (`9020b30`)
 - **Reads:** `read_u32`, `read`, etc. keep up to 8 files open with a 64 KiB read window. A read went from
   about 6 µs to 0.15 µs. The NEED check still runs the first time a path is read. Files are closed

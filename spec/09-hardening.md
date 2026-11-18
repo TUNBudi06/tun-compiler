@@ -37,10 +37,14 @@ canonical format changes meaning).
   the private key. Like the private key, it **never** ships to users and never reaches the build
   server in the clear beyond what key embedding already sends.
 - `gen-executor` embeds `op_seed` into the executor through `generated_keys.rs`
-  (`pub const OP_SEED: Option<[u8; 32]>`), obfuscated like the other embedded secrets. The generic
-  executor template has `OP_SEED = None`.
+  (`fn op_seed() -> Option<[u8; 32]>`, wrapped with `obfstr::obfbytes!` like `master_key()`; a const
+  cannot be obfuscated that way). The generic executor template returns `None`.
 - The distributor's builder reads `op_seed` from `identity.tzid` when packing, so both sides derive
   the same permutation. No new file, no extra key exchange.
+- **Keying is opt-in per build** (`quicktzs build --keyed`), NOT automatic for every seeded identity:
+  keying every signed build would make all of them unrunnable on the generic executor and break
+  local testing. Without `--keyed` a build stays canonical with the flag clear. `--keyed` errors if
+  the identity has no seed or the build is unsigned.
 
 Old `identity.tzid` files (no `op_seed`) stay valid: a missing seed means "not keyed", builds stay
 canonical. `keygen` from now on writes a seed; `rotate`/`revoke` keep it.
