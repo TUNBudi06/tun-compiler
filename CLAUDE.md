@@ -20,6 +20,7 @@ language (`.tzst`) + a verifying executor. Rust, one Cargo workspace. See
 - `spec/06-distribution-security.md` — keys, key modes, dev/release, the promise
 - `spec/07-worked-examples.md` — text → compiled bytes (reproduce exactly)
 - `spec/08-workspace.md` — crate layout, build order, invariants
+- `spec/09-hardening.md` — opcode permutation + verify self-defense (pre-release, opt-in via gen-executor)
 
 ## Non-negotiable invariants
 
