@@ -13,11 +13,7 @@ const USAGE: &str = "usage (distributor first run, in order):
      quicktzs setup-server --add-license -i <identity.tzid> [-o <dir>]
   3. quicktzs setup-user -i <identity.tzid> [--author-id N] [--name TEXT]
   4. quicktzs gen-generator -i <identity.tzid> -o <dir> [--key <id>]
-  5. quicktzs gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>
-                         [--master-key <master.key> | --server-config <server.tsrv>]
-                         [--build-token <file>]   (else env QUICKTZS_BUILD_TOKEN)
-     targets: x64-linux, arm64-linux, x64-termux, arm64-termux
-  5b. quicktzs make-executor --template <exectzs> -i <identity.tzid> [--key-mode 0|1|2] [--master-key <hex|file> | --server <url>] -o <out>
+  5. quicktzs make-executor --template <exectzs> -i <identity.tzid> [--key-mode 0|1|2] [--master-key <hex|file> | --server <url>] -o <out>
                          (patches the config slot of a prebuilt executor: no cargo, no network; key-mode defaults to 1 with --master-key, 2 with --server, else 0)
 other commands:
   quicktzs build <dir> -o <out.qtz> [--identity <identity.tzid>] [--encrypt --master-key <master.key> [--server-config <server.tsrv>]]
@@ -124,22 +120,6 @@ fn gen_generator(args: &[String]) -> Result<(), BuildError> {
     distrib::gen_generator(Path::new(id), Path::new(out), num(&m, "--key")?)?;
     println!("wrote {out}/quicktzs and {out}/identity.tzid (private key still passphrase-encrypted)");
     Ok(())
-}
-
-/// Returns the process exit code.
-fn gen_executor(args: &[String]) -> Result<i32, BuildError> {
-    let m = flags(args, &["-i", "--server", "--target", "-o", "--master-key", "--server-config", "--build-token"], &[])?;
-    let (Some(id), Some(server), Some(t), Some(out)) = (m.get("-i"), m.get("--server"), m.get("--target"), m.get("-o")) else {
-        return msg("usage: quicktzs gen-executor -i <identity.tzid> --server <http://host:port> --target <arch>-<platform>[,...] -o <dir>");
-    };
-    let master = m.get("--master-key").map(|p| keys::read_master_key(Path::new(p))).transpose()?;
-    let tsrv = m.get("--server-config").map(|p| std::fs::read(p).map_err(|e| BuildError::Io(format!("cannot read {p}: {e}")))).transpose()?;
-    let token = match m.get("--build-token") {
-        Some(p) => Some(std::fs::read_to_string(p).map_err(|e| BuildError::Io(format!("cannot read {p}: {e}")))?.trim().to_string()),
-        None => std::env::var("QUICKTZS_BUILD_TOKEN").or_else(|_| std::env::var("TUNPAK_BUILD_TOKEN")).ok(), // TUNPAK_* kept for compatibility
-    };
-    let ok = distrib::gen_executor(Path::new(id), server, distrib::parse_targets(t)?, Path::new(out), master, tsrv, token)?;
-    Ok(if ok { 0 } else { 1 })
 }
 
 fn make_executor(args: &[String]) -> Result<(), BuildError> {
@@ -337,7 +317,6 @@ fn main() {
         Some("setup-user") => setup_user(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("gen-generator") => gen_generator(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("make-executor") => make_executor(&args[1..]).unwrap_or_else(|e| fail(e)),
-        Some("gen-executor") => exit(gen_executor(&args[1..]).unwrap_or_else(|e| fail(e))),
         Some(_) => {
             eprintln!("{USAGE}");
             exit(2)

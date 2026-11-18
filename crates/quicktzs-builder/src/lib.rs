@@ -2,7 +2,6 @@
 pub mod dev;
 pub mod distrib;
 mod ffi;
-mod http;
 pub mod inspect;
 pub mod keys;
 pub mod libs;

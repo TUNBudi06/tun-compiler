@@ -6,8 +6,24 @@ existing modules build or run.
 
 ## 2026-11-18
 
+### Changed: executors are patched, not recompiled. Removed the build-server `/build` (`PENDING3`)
+- **`quicktzs make-executor`** stamps your keys into a prebuilt `exectzs`: a reserved 2048-byte
+  config slot (magic + XOR-masked, SHA-256-checksummed payload) holds the pubkey(s), `op_seed`,
+  key mode and master key / server URL. No recompile, no Rust toolchain, no source — works on any
+  OS against any prebuilt target. An unpatched `exectzs` is the generic (dev-only) executor; a
+  tampered slot makes it refuse to run. (`spec/09` §4.)
+- **Removed:** `gen-executor`, the build server's `POST /build` recompile (`compile.rs`,
+  `codegen.rs`), the `build_request` (`TBRQ`) format, the builder HTTP client, and
+  `generated_keys.rs`. The executor reads all config from the slot now (else blank).
+- **Kept:** `quicktzs-buildserver` now serves only key_mode-2 entry keys (`POST /key`, `GET
+  /health`); the runtime keysource client and key_mode 2 end to end are unchanged. `keygen`,
+  `setup-server`, `setup-user`, `gen-generator`, `build`, `lib-check`, `inspect`, `dev run` all
+  still work.
+- **Compatibility:** no change to the `.qtz` module format. Distributors who used `gen-executor`
+  now use `make-executor` on a prebuilt binary; the build server no longer builds executors.
+
 ### Added: executor hardening — keyed opcodes + verify self-defense (`db9928e`)
-- **Keyed opcode map** (`spec/09` §1, gen-executor only): `quicktzs build --keyed` scrambles the
+- **Keyed opcode map** (`spec/09` §1, `--keyed` builds only): `quicktzs build --keyed` scrambles the
   2-byte opcode numbers with a secret 32-byte `op_seed` from `identity.tzid`, different per
   distributor. The paired executor (seed embedded via `gen-executor`) un-scrambles with a table
   built once at pak load, so dispatch speed is unchanged. A keyed module runs only on its own

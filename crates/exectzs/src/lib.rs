@@ -4,7 +4,6 @@
 
 pub mod antiattach;
 pub mod crypto;
-pub mod generated_keys;
 pub mod keysource;
 pub mod loader;
 pub mod perm;
@@ -37,7 +36,7 @@ pub struct RunOptions {
     pub mem_limit: Option<u64>,
     /// Budget of the ON_EXIT handler (default 5 s).
     pub on_exit_timeout_ms: Option<u64>,
-    /// Trusted identity/keys. `None` = the executor's resolved config (patched slot, else `generated_keys.rs`).
+    /// Trusted identity/keys. `None` = the executor's resolved config (patched slot, else blank).
     pub trust: Option<Trust>,
     /// Auto-approve the manifest and every RUN prompt (tests, `--yes`).
     pub assume_yes: bool,
@@ -71,7 +70,7 @@ pub struct Trust {
 }
 
 impl Trust {
-    /// The executor's resolved config: patched slot, else `generated_keys`, else blank (see `slot`).
+    /// The executor's resolved config: patched slot, else blank (see `slot`).
     /// A corrupt slot yields a blank trust here; `run_inner_io` refuses outright via `slot::resolved_trust`.
     pub fn compiled() -> Trust {
         slot::resolved_trust().unwrap_or_default()

@@ -1,4 +1,4 @@
-//! Milestone v3: setup-server / setup-user / gen-generator / gen-executor, key_mode 2 builds.
+//! Milestone v3: setup-server / setup-user / gen-generator, key_mode 2 builds.
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,11 +12,10 @@ use std::thread::JoinHandle;
 use quicktzs_builder::keys;
 use quicktzs_crypto::{hash::sha256, hkdf::derive_entry_key};
 use exectzs::{run_pak_bytes_io, Io, RunOptions, Trust, TrustedKey};
-use quicktzs_format::buildreq::BuildRequest;
 use quicktzs_format::config::ServerConfig;
 use quicktzs_format::dict::Dict;
 use quicktzs_format::pak::PakHeader;
-use quicktzs_format::types::{Arch, KeyMode, Platform};
+use quicktzs_format::types::KeyMode;
 
 const PW: &str = "test passphrase";
 const BIN: &str = env!("CARGO_BIN_EXE_quicktzs");
@@ -156,7 +155,7 @@ fn gen_generator_keeps_only_chosen_key_and_is_auto_discovered() {
     assert!(!r.status.success());
 }
 
-/// Fake HTTP server: serves one request, hands (headers, body) to `f`, answers with its (status, body).
+/// Fake key server: serves one request, hands (headers, body) to `f`, answers with its (status, body).
 fn serve<F>(f: F) -> (String, JoinHandle<()>)
 where
     F: FnOnce(HashMap<String, String>, Vec<u8>) -> (u16, Vec<u8>) + Send + 'static,
@@ -186,78 +185,6 @@ where
         sock.write_all(&out).unwrap();
     });
     (url, h)
-}
-
-fn reply() -> Vec<u8> {
-    let mut o = vec![2u8, Arch::X64 as u8, Platform::LinuxGlibc as u8, 0];
-    o.extend(3u32.to_le_bytes());
-    o.extend(b"BIN");
-    let m = b"target not installed; rustup target add aarch64-unknown-linux-gnu";
-    o.extend([Arch::Arm64 as u8, Platform::LinuxGlibc as u8, 1]);
-    o.extend((m.len() as u32).to_le_bytes());
-    o.extend(m);
-    o
-}
-
-#[test]
-fn gen_executor_against_fake_server_both_key_modes() {
-    let (dir, id) = new_id("ge");
-    let ident = keys::load_identity(&id).unwrap();
-    assert!(!ident.keys[0].enc_priv.is_empty());
-    let sconf = tmp("ge-srv");
-    ok(&run(&["setup-server", "--url", "http://k:1", "-i", s(&id), "-o", s(&sconf)]));
-    let tsrv = sconf.join("server.tsrv");
-
-    for mode_2 in [false, true] {
-        let out = tmp("ge-out");
-        let want_master = fs::read(dir.join("master.key")).unwrap();
-        let want_tsrv = fs::read(&tsrv).unwrap();
-        let app = ident.app_id;
-        let (url, h) = serve(move |hd, body| {
-            let (req, used) = BuildRequest::parse(&body).expect("body parses as BuildRequest (no enc_priv)");
-            assert!(req.identity.keys.iter().all(|k| k.enc_priv.is_empty()));
-            assert_eq!(req.identity.app_id, app);
-            assert_eq!(req.targets.len(), 2);
-            if mode_2 {
-                assert_eq!(&body[used..], &want_tsrv[..]);
-                assert!(!hd.contains_key("x-quicktzs-master-key"));
-            } else {
-                assert_eq!(body.len(), used);
-                assert_eq!(hd["x-quicktzs-master-key"], hex(&want_master));
-            }
-            (200, reply())
-        });
-        let mk = dir.join("master.key");
-        let key_arg = if mode_2 { ["--server-config", s(&tsrv)] } else { ["--master-key", s(&mk)] };
-        let o = run(&["gen-executor", "-i", s(&id), "--server", &url, "--target", "x64-linux,arm64-linux", "-o", s(&out), key_arg[0], key_arg[1]]);
-        h.join().unwrap();
-        assert_eq!(o.status.code(), Some(1));
-        let err = String::from_utf8_lossy(&o.stderr);
-        assert!(err.contains("rustup target add aarch64-unknown-linux-gnu") && err.contains("arm64-linux"), "{err}");
-        let f = out.join("exectzs-x64-linux");
-        assert_eq!((fs::read(&f).unwrap(), mode(&f)), (b"BIN".to_vec(), 0o755));
-        assert!(!out.join("exectzs-arm64-linux").exists());
-        assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
-    }
-}
-
-#[test]
-fn gen_executor_input_errors() {
-    let (dir, id) = new_id("ge-err");
-    let out = tmp("ge-err-out");
-    let o = run(&["gen-executor", "-i", s(&id), "--server", "https://x.example", "--target", "x64-linux", "-o", s(&out)]);
-    assert_eq!(o.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("https://"));
-    let o = run(&["gen-executor", "-i", s(&id), "--server", "http://127.0.0.1:1", "--target", "x86-dos", "-o", s(&out)]);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown target"));
-    // TSRV for another app is refused before anything is sent
-    let other = tmp("ge-other");
-    ok(&run(&["keygen", "-o", s(&other)]));
-    ok(&run(&["setup-server", "--url", "http://k:1", "-i", s(&other.join("identity.tzid")), "-o", s(&other)]));
-    let o = run(&["gen-executor", "-i", s(&id), "--server", "http://127.0.0.1:1", "--target", "x64-linux", "-o", s(&out), "--server-config", s(&other.join("server.tsrv"))]);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("app_id"));
-    let o = run(&["gen-executor", "-i", s(&id), "--server", "http://127.0.0.1:1", "--target", "x64-linux", "-o", s(&out), "--server-config", s(&other.join("server.tsrv")), "--master-key", s(&dir.join("master.key"))]);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("mutually exclusive"));
 }
 
 #[test]
@@ -306,24 +233,6 @@ fn key_mode_2_pak_runs_through_executor_with_fake_key_server() {
     h.join().unwrap();
     assert!(matches!(res, Ok(0)), "{res:?} {}", String::from_utf8_lossy(&err));
     assert!(String::from_utf8_lossy(&out).contains("done"));
-}
-
-#[test]
-fn gen_executor_build_token_and_master_key_http_guard() {
-    let (dir, id) = new_id("ge-tok");
-    let out = tmp("ge-tok-out");
-    let tokf = dir.join("tok");
-    fs::write(&tokf, "sekret\n").unwrap();
-    let (url, h) = serve(|hd, _| {
-        assert_eq!(hd["x-quicktzs-build-token"], "sekret");
-        (403, b"no".to_vec())
-    });
-    let o = run(&["gen-executor", "-i", s(&id), "--server", &url, "--target", "x64-linux", "-o", s(&out), "--build-token", s(&tokf)]);
-    h.join().unwrap();
-    assert!(String::from_utf8_lossy(&o.stderr).contains("build token missing or wrong"));
-    // master key over plain http to a non-loopback host is refused before any connection
-    let o = run(&["gen-executor", "-i", s(&id), "--server", "http://example.invalid", "--target", "x64-linux", "-o", s(&out), "--master-key", s(&dir.join("master.key"))]);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("SSH tunnel"));
 }
 
 #[test]

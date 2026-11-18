@@ -375,6 +375,7 @@ version = "0.1.0"
 dependencies = [
  "exectzs",
  "libc",
+ "quicktzs-buildserver",
  "quicktzs-crypto",
  "quicktzs-format",
  "quicktzs-tzst",
@@ -384,9 +385,7 @@ dependencies = [
 name = "quicktzs-buildserver"
 version = "0.1.0"
 dependencies = [
- "libc",
  "quicktzs-crypto",
- "quicktzs-format",
 ]
 
 [[package]]

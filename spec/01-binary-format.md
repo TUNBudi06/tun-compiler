@@ -199,20 +199,13 @@ per function:
 
 ---
 
-## 8. build_request (distributor → build server; builds EXECUTOR only)
+## 8. (removed) build_request
 
-```
-0x00  4B  magic         "TBRQ"
-0x04  1B  version
-0x05  ..  identity_tzid  (WITHOUT enc_priv — private key never leaves the distributor)
-+..   1B  target_count
-+..   ..  targets[]      each: arch:1 platform:1
-+..   2B  options        bit1=strip bit2=obfstr
-```
-
-The build server generates `generated_keys.rs` (app_id, author_id, key_mode, pubkeys,
-server_url via obfstr) and `cargo build`s the executor template per target
-(embed + recompile). It never receives the private key.
+The executor is no longer built by recompiling via a build server. It is configured by
+patching a prebuilt binary's config slot (see spec/09 §4), so the `build_request` (`TBRQ`)
+format, `gen-executor` and the build server's `POST /build` route are gone. The config slot
+layout lives in spec/09 §4.2. The `quicktzs-buildserver` now serves only key_mode-2 entry
+keys (`POST /key`).
 
 ---
 

@@ -103,9 +103,6 @@ pub const GFLAG_OP_KEYED: u8 = 1 << 2;
 pub const TUN_COMPRESSED: u8 = 1 << 0;
 pub const TUN_ENCRYPTED: u8 = 1 << 1;
 
-// build_request options (§8).
-pub const OPT_STRIP: u16 = 1 << 1;
-pub const OPT_OBFSTR: u16 = 1 << 2;
 
 #[cfg(test)]
 mod tests {

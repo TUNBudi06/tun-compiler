@@ -22,3 +22,4 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 libc = "0.2"
+quicktzs-buildserver = { path = "../../buildserver" }

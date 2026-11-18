@@ -15,7 +15,6 @@ quicktzs/
 │   │       ├── tun.rs         # main.tun header
 │   │       ├── identity.rs    # identity.tzid
 │   │       ├── config.rs      # server_config
-│   │       ├── buildreq.rs    # build_request
 │   │       ├── libfn.rs       # LFNT lib export table
 │   │       ├── opcodes.rs     # opcode enum (from 02-opcodes.md)
 │   │       └── types.rs       # EntryType, KeyMode, Arch, Platform, flags, Value types
@@ -41,7 +40,7 @@ quicktzs/
 │           ├── main.rs        # verify → parse → run main.tun → cleanup
 │           ├── verify.rs      # Ed25519 verify FIRST
 │           ├── crypto.rs      # per-entry hash-check → decrypt → decompress
-│           ├── generated_keys.rs   # written by build server (app_id, pubkeys, ...)
+│           ├── slot.rs        # patchable config slot (keys, op_seed, key_mode); spec/09 §4
 │           ├── keysource/{local,server}.rs
 │           ├── perm.rs        # render permission manifest, get user approval
 │           ├── vm/{interp,vars,stack,frame}.rs   # shared VM for tun + tzst
@@ -50,8 +49,8 @@ quicktzs/
 │           ├── sandbox.rs     # child kill-on-exit, temp cleanup (optional jail)
 │           └── platform/{linux,termux}.rs
 │
-└── buildserver/               # vendor server (builds executors; not shipped)
-    └── src/{main,codegen,compile,license}.rs
+└── buildserver/               # vendor key server for key_mode 2 (POST /key); not shipped
+    └── src/{main,lib,license}.rs
 ```
 
 ## Cargo profile (executor release)
@@ -92,7 +91,7 @@ Plus `obfstr` for embedded strings (server_url, etc.). Builder has no such harde
 
 **v3 (distribution):**
 16. keygen, identity.tzid, gen-generator.
-17. build server + gen-executor (embed + recompile). key_mode 2 server endpoint.
+17. make-executor (patch config slot; spec/09 §4). key_mode 2 key server (POST /key).
 18. Termux target + platform specifics.
 
 ## Testing strategy

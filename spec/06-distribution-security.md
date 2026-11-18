@@ -24,7 +24,8 @@ signed by their private key, all running on their executor.
 2. quicktzs setup-server  → (key_mode 2 only) endpoint + master key (server-side only)
 3. quicktzs setup-user    → distributor identity (author_id, name)
 4. quicktzs gen-generator → builder carrying the (encrypted) private key
-5. quicktzs gen-executor  → request build server to build executor with public key embedded
+5. quicktzs make-executor → patch a prebuilt executor with the public key(s) + op_seed
+                            (no recompile; see spec/09 §4)
 ```
 
 ## Key model
@@ -48,20 +49,21 @@ signed by their private key, all running on their executor.
 Encryption raises the bar; it is not real protection (DRM reality). **Signature is the
 real protection** (anti-forgery, mathematically sound).
 
-## Build server (embed + recompile)
+## Executor config: patch, not recompile (spec/09 §4)
 
-Builds the EXECUTOR only (not modules). On `gen-executor`:
+The executor is configured by **patching a prebuilt binary**, not by recompiling. The vendor
+publishes one blank `exectzs` per target (the CI artifacts); `quicktzs make-executor` stamps the
+distributor's public key(s), `op_seed`, key mode and (mode 1/2) master key / server URL into a
+reserved, XOR-masked, SHA-256-checksummed slot. No Rust toolchain, no source, no network. An
+unpatched binary is the generic executor (dev-only); a tampered slot makes it refuse to run.
 
-```
-identity.tzid (no private key) + target list
-  → generate generated_keys.rs (app_id, author_id, key_mode, pubkeys[], server_url[obfstr])
-  → cargo build --release the executor template, per target (cross-compile)
-  → return executor binary per target
-```
+This replaces the former build-server recompile (`gen-executor`, `POST /build`,
+`generated_keys.rs`, `build_request`), all removed. The private key is never involved in patching.
 
-Embed + recompile is chosen over placeholder-patching because the embedded values go
-through the optimizer (obfstr on strings, inlining, no fixed marker to grep). The private
-key is never sent to the build server.
+## Key server (`quicktzs-buildserver`, `POST /key`)
+
+For key_mode 2 the distributor runs `quicktzs-buildserver`, which serves entry keys to licensed
+executors at runtime (`POST /key`, `GET /health`). It no longer builds executors.
 
 ## Security philosophy (the core promise)
 

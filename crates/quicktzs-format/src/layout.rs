@@ -10,7 +10,6 @@ pub const MAGIC_DICT_V0: [u8; 4] = *b"DICT";
 pub const MAGIC_TZID: [u8; 4] = *b"TZID";
 pub const MAGIC_TSRV: [u8; 4] = *b"TSRV";
 pub const MAGIC_LFNT: [u8; 4] = *b"LFNT";
-pub const MAGIC_TBRQ: [u8; 4] = *b"TBRQ";
 
 /// Current format versions (all 1).
 pub const TUN_VERSION: u8 = 1;
@@ -18,7 +17,6 @@ pub const PAK_VERSION: u8 = 1;
 pub const DICT_VERSION: u8 = 1;
 pub const TZID_VERSION: u8 = 1;
 pub const TSRV_VERSION: u8 = 1;
-pub const TBRQ_VERSION: u8 = 1;
 
 // --- main.tun header (§1) ---
 pub const TUN_OFF_MAGIC: usize = 0x00;
@@ -100,5 +98,3 @@ pub const TAG_LEN: usize = 16;
 pub const LFNT_OFF_FN_COUNT: usize = 0x04;
 pub const LFNT_OFF_FUNCTIONS: usize = 0x06;
 
-// --- build_request (§8) ---
-pub const TBRQ_OFF_IDENTITY: usize = 0x05;

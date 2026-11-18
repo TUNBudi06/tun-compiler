@@ -12,6 +12,4 @@ name = "quicktzs-buildserver"
 path = "src/main.rs"
 
 [dependencies]
-quicktzs-format = { path = "../crates/quicktzs-format" }
 quicktzs-crypto = { path = "../crates/quicktzs-crypto" }
-libc = "0.2"

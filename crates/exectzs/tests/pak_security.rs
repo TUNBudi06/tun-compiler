@@ -41,7 +41,7 @@ fn signed_by_trusted_key_runs() {
 fn default_compiled_trust_refuses_everything() {
     let k = keys();
     let pak = build(exit7(), vec![], &signed(&k));
-    let opts = RunOptions::default(); // trust: None -> generated_keys.rs, which has no keys
+    let opts = RunOptions::default(); // trust: None -> unpatched slot = blank, no keys
     let e = run(&pak, &opts, "").err_msg();
     assert!(e.contains("signature verification failed"), "{e}");
 }

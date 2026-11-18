@@ -1,14 +1,12 @@
-//! Distributor first-run steps 2-5 (spec/06): setup-server, setup-user, gen-generator, gen-executor.
+//! Distributor first-run steps 2-5 (spec/06): setup-server, setup-user, gen-generator.
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use quicktzs_crypto::{encrypt::random_bytes, hash::sha256};
-use quicktzs_format::buildreq::{BuildRequest, Target};
 use quicktzs_format::config::{ServerConfig, CACHE_NONE, CACHE_TOKEN};
-use quicktzs_format::identity::{Identity, KEY_REVOKED};
-use quicktzs_format::layout::{TBRQ_VERSION, TSRV_VERSION};
-use quicktzs_format::types::{Arch, Platform, OPT_OBFSTR, OPT_STRIP};
+use quicktzs_format::identity::KEY_REVOKED;
+use quicktzs_format::layout::TSRV_VERSION;
 
 use crate::keys::{load_identity, save_identity, Secret};
 use crate::packer::{write_atomic_mode, BuildError};
@@ -126,81 +124,4 @@ pub fn gen_generator(identity: &Path, out: &Path, key: Option<u8>) -> Result<(),
     id.serialize(&mut b)?;
     write_atomic_mode(&out.join("quicktzs"), &bin, Some(0o755))?;
     write_atomic_mode(&out.join("identity.tzid"), &b, Some(0o600))
-}
-
-/// `x64-linux` style names <-> real enums.
-const TARGETS: [(&str, Arch, Platform); 4] = [
-    ("x64-linux", Arch::X64, Platform::LinuxGlibc),
-    ("arm64-linux", Arch::Arm64, Platform::LinuxGlibc),
-    ("x64-termux", Arch::X64, Platform::Termux),
-    ("arm64-termux", Arch::Arm64, Platform::Termux),
-];
-fn target_name(a: Arch, p: Platform) -> String {
-    TARGETS.iter().find(|t| t.1 == a && t.2 == p).map_or_else(|| format!("{}-{}", u8::from(a), u8::from(p)), |t| t.0.to_string())
-}
-pub fn parse_targets(s: &str) -> Result<Vec<Target>, BuildError> {
-    s.split(',')
-        .map(|n| TARGETS.iter().find(|t| t.0 == n).map(|t| Target { arch: t.1, platform: t.2 }).ok_or_else(|| BuildError::Msg(format!("unknown target '{n}' (use x64-linux, arm64-linux, x64-termux, arm64-termux)"))))
-        .collect()
-}
-
-/// Step 5. Returns true when every target succeeded. Key mode: `tsrv` -> 2, else `master` -> 1, else 0.
-pub fn gen_executor(identity: &Path, server: &str, targets: Vec<Target>, out: &Path, master: Option<Secret>, tsrv: Option<Vec<u8>>, token: Option<String>) -> Result<bool, BuildError> {
-    crate::http::parse_url(server)?;
-    if master.is_some() && tsrv.is_some() {
-        return msg("--master-key and --server-config are mutually exclusive");
-    }
-    let id: Identity = load_identity(identity)?.without_private();
-    // invariants 7/8: the private key never reaches the build server
-    assert!(id.keys.iter().all(|k| k.enc_priv.is_empty()), "enc_priv must be stripped before sending");
-    if let Some(t) = &tsrv {
-        let (cfg, used) = ServerConfig::parse(t)?;
-        if used != t.len() || cfg.app_id != id.app_id {
-            return msg(format!("server config is for app_id {}, identity has {}", cfg.app_id, id.app_id));
-        }
-    }
-    let id_keyed = id.op_seed.is_some();
-    let req = BuildRequest { version: TBRQ_VERSION, identity: id, targets: targets.clone(), options: OPT_STRIP | OPT_OBFSTR };
-    let mut body = Vec::new();
-    req.serialize(&mut body)?;
-    body.extend(tsrv.unwrap_or_default());
-    let (host, _) = crate::http::parse_url(server)?;
-    let h = host.rsplit_once(':').map_or(host.as_str(), |x| x.0);
-    if (master.is_some() || id_keyed) && !matches!(h, "localhost" | "127.0.0.1" | "[::1]") {
-        return msg(format!("refusing to send the master key or op_seed over plain http to '{h}'; use an SSH tunnel and --server http://localhost:PORT"));
-    }
-    let mut hdr: Vec<(&str, String)> = master.iter().map(|m| ("X-QuickTZS-Master-Key", hex(&m.0))).collect();
-    if let Some(t) = token {
-        if t.is_empty() || !t.bytes().all(|b| (0x21..0x7f).contains(&b)) {
-            return msg("build token must be non-empty printable ASCII without spaces");
-        }
-        hdr.push(("X-QuickTZS-Build-Token", t));
-    }
-    let (status, resp) = crate::http::post(server, "build", &hdr, &body)?;
-    if status == 403 {
-        return msg("build server answered 403: build token missing or wrong (set QUICKTZS_BUILD_TOKEN or --build-token <file>)");
-    }
-    if status != 200 {
-        return msg(format!("build server answered {status}: {}", String::from_utf8_lossy(&resp).trim()));
-    }
-    let bad = || BuildError::Msg("malformed build server response".into());
-    let count = *resp.first().ok_or_else(bad)? as usize;
-    let (mut pos, mut all_ok) = (1, true);
-    fs::create_dir_all(out).map_err(|e| io("create", out, e))?;
-    for _ in 0..count {
-        let h = resp.get(pos..pos + 7).ok_or_else(bad)?;
-        let len = u32::from_le_bytes(h[3..7].try_into().unwrap()) as usize;
-        let data = resp.get(pos + 7..pos + 7 + len).ok_or_else(bad)?;
-        pos += 7 + len;
-        let name = target_name(Arch::try_from(h[0])?, Platform::try_from(h[1])?);
-        if h[2] == 0 {
-            let p = out.join(format!("exectzs-{name}"));
-            write_atomic_mode(&p, data, Some(0o755))?;
-            println!("{name}: wrote {}", p.display());
-        } else {
-            all_ok = false;
-            eprintln!("{name}: build failed: {}", String::from_utf8_lossy(data).trim());
-        }
-    }
-    Ok(all_ok && count == targets.len())
 }

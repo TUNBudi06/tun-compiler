@@ -138,3 +138,40 @@ fn make_executor_errors() {
     let o = make(&fake, &idp, &d.join("o"), &["--master-key", &"07".repeat(32)]);
     assert!(o.status.success(), "{}", err(&o));
 }
+
+/// key_mode 2 end to end: real /key server, make-executor --server, patched exectzs fetches the key and runs.
+#[test]
+fn key_mode_2_patched_executor_with_real_key_server() {
+    use std::sync::Arc;
+    let (_, idp) = new_id("km2");
+    let id = keys::load_identity(&idp).unwrap();
+    let srv = tmp("km2-srv");
+    assert!(qtz(&["setup-server", "--url", "http://k:1", "-i", s(&idp), "-o", s(&srv)]).status.success());
+    let lic = qtz(&["setup-server", "--add-license", "-i", s(&idp), "-o", s(&srv)]);
+    let lic = String::from_utf8_lossy(&lic.stdout).trim().to_string();
+    let master = srv.join("server-data/apps").join(id.app_id.to_string()).join("master.key");
+
+    let m = tmp("km2-mod");
+    fs::create_dir_all(m.join("scripts")).unwrap();
+    fs::write(m.join("main.tun"), r#"START { set @0 = "x"; } MAIN { run "scripts/main"; }"#).unwrap();
+    fs::write(m.join("scripts/main.tzst"), "start { print \"secret-ok\"; }\n").unwrap();
+    let pak = m.join("m.qtz");
+    let o = qtz(&["build", s(&m), "-o", s(&pak), "--identity", s(&idp), "--encrypt", "--master-key", s(&master), "--server-config", s(&srv.join("server.tsrv"))]);
+    assert!(o.status.success(), "{}", err(&o));
+
+    let data = quicktzs_buildserver::prepare_data_dir(&srv.join("server-data")).unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let cfg = quicktzs_buildserver::Config { data, read_deadline: quicktzs_buildserver::DEFAULT_READ_DEADLINE };
+    std::thread::spawn(move || quicktzs_buildserver::serve(l, Arc::new(cfg)));
+
+    let tpl = template();
+    let player = tmp("km2-out").join("player");
+    let o = make(&tpl, &idp, &player, &["--server", &url]);
+    assert!(o.status.success(), "{}", err(&o));
+
+    let run = |lic: &str| Command::new(&player).args(["--yes", "--license", lic, s(&pak)]).output().unwrap();
+    let ok = run(&lic);
+    assert!(ok.status.success() && String::from_utf8_lossy(&ok.stdout).contains("secret-ok"), "{}", err(&ok));
+    assert!(!run("wrong-license").status.success());
+}

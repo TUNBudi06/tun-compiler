@@ -21,7 +21,7 @@ workflow artifacts of the `Release` Actions run for every push to `main`. Each a
 
 The prebuilt `exectzs` is generic: it has no distributor keys built in, so it trusts no
 signing key and will not accept your paks. To ship paks to users, a distributor builds an executor that
-trusts their own key with `quicktzs gen-executor` (see below).
+trusts their own key with `quicktzs make-executor` (patches a prebuilt binary; see below).
 
 ## Quick start
 
@@ -96,21 +96,25 @@ entries (2):
 
 ### Distributor flow: an executor that trusts your key
 
-The build server builds executors with your public key compiled in. It needs `cargo` and
-the repository's workspace as its template (the default), and a Rust target for each
-platform you ask for.
+You configure an executor by **patching a prebuilt binary** — no recompile, no Rust
+toolchain, no source. Take a published `exectzs` (the Releases/CI artifact, or one you
+built) and stamp your keys into it with `make-executor`:
 
 ```sh
-quicktzs-buildserver --bind 127.0.0.1:7878 --data srvdata &
-quicktzs gen-executor -i keys/identity.tzid --server http://127.0.0.1:7878 \
-    --target x64-linux -o out
-# x64-linux: wrote out/exectzs-x64-linux
+quicktzs make-executor --template ./exectzs -i keys/identity.tzid -o out/myplayer
+# for key_mode 2: add --server https://keys.example   (runtime key server)
+# for key_mode 1: add --master-key <hex|file>
 ```
 
-Run the pak with the generated executor. Without `--yes` it prints the manifest and asks:
+This writes your public key(s), `op_seed`, key mode and server URL into a reserved,
+checksummed slot in the binary. An unpatched `exectzs` is the generic executor (dev-only,
+trusts nothing). A tampered slot makes the executor refuse to run. The patch tool works on
+any OS against any prebuilt target.
+
+Run the pak with the patched executor. Without `--yes` it prints the manifest and asks:
 
 ```sh
-$ ./out/exectzs-x64-linux hello.qtz
+$ ./out/myplayer hello.qtz
 This module requests the following permissions:
   App ID: ...   Author ID: ...   Pak version: 1
 Runs program: scripts/main.tzst
