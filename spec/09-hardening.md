@@ -147,6 +147,77 @@ distributor can still debug their own executor.
 
 ---
 
+## 4. Patch-based executor config (replaces the recompile path)
+
+Decision: the executor is **configured by patching a prebuilt binary**, not by recompiling. There is
+no build server `/build` route and no `gen-executor` recompile. This removes the Rust-toolchain and
+source-exposure requirements for making an executor: the vendor publishes one prebuilt "blank"
+executor per target (the CI artifacts already are these), and anyone stamps their keys into it
+locally in seconds.
+
+### 4.1 The config slot
+
+The executor is compiled with a fixed-size reserved region as a `static` (so it lands in a data
+section, never `.text`, and never affects any future code-integrity hash):
+
+```
+#[used] static CONFIG_SLOT: [u8; 2048] = <magic ++ zeros>;
+```
+
+- Starts with an 8-byte magic so the patch tool can locate it in the binary.
+- Unpatched (magic present, body zero) ⇒ this is the generic/blank executor: trusts nothing, runs
+  only under `--dev`. The published `exectzs` binary is exactly this.
+- Patched ⇒ the body is the masked, checksummed config payload (below).
+
+### 4.2 Payload (what the recompile used to embed, now in the slot)
+
+Fixed little-endian layout, the whole body XOR-masked with a fixed obfuscation key before writing:
+
+```
+version:1  key_mode:1  flags:1  app_id:4  author_id:4
+op_seed_present:1  op_seed:32
+master_present:1   master_key:32         # key_mode 1 only
+server_url_len:2   server_url:<=512
+pubkey_count:1     pubkeys:[ id:1 key:32 revoked:1 ] * count   # <= 16
+sha256(payload-above):32                                       # integrity
+```
+
+`flags` carries `require_online` etc. as needed. The trailing SHA-256 is checked on load; a
+corrupt/partial/oversized patch ⇒ the executor refuses to run with a generic error. XOR-masking is a
+speed bump (keeps `op_seed`/`master_key` out of a plain `strings` dump); a reverse-engineer with the
+binary still recovers them — this is no weaker than the recompile for the "attacker has the
+executor" case, since the seed was always inside the executor.
+
+### 4.3 Config resolution (executor startup)
+
+Single resolved config, in order: **slot (if patched, checksum OK) → else blank (dev-only)**. The
+old `generated_keys.rs` recompile embedding is removed; everything that read `APP_ID`, `KEY_MODE`,
+`PUBKEYS`, `master_key()`, `server_url()`, `op_seed()` now reads the resolved config. The keyed
+inverse table (§1.5) is built from the resolved `op_seed`.
+
+### 4.4 The patch tool
+
+```
+quicktzs make-executor --template ./exectzs -i identity.tzid \
+    [--key-mode 0|1|2] [--master-key ...|--server URL] -o ./myplayer
+```
+
+Reads the template binary, finds the slot, serializes + masks + checksums the payload, writes it
+into the slot, saves the output. No cargo, no network, no source. Target-agnostic: patch any
+prebuilt target's binary from any OS. Errors if the payload exceeds the slot or the template has no
+slot/magic.
+
+### 4.5 What is removed, what stays
+
+Removed: `quicktzs-buildserver` `POST /build` + its recompile (`compile.rs`, the `generated_keys`
+codegen), `gen-executor`, the builder `http` client, the `build_request` format (`buildreq`),
+`exectzs/src/generated_keys.rs`, and the v3 tests that exercised `/build`.
+
+**Kept (must not break):** `POST /key` (entry-key server for key_mode 2) and the executor's runtime
+`keysource` client; `keygen`, `setup-server` (key-server config), `setup-user`, `gen-generator`;
+key_mode 2 end to end; everything about building and running modules; the keyed-opcode and
+verify-self-defense features from §1–§2.
+
 ## 3. What this freezes vs. what can change later
 
 Frozen now (needed before the release tag):
