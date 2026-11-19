@@ -23,6 +23,11 @@ The prebuilt `exectzs` is generic: it has no distributor keys built in, so it tr
 signing key and will not accept your paks. To ship paks to users, a distributor builds an executor that
 trusts their own key with `quicktzs make-executor` (patches a prebuilt binary; see below).
 
+## Documentation
+
+A hands-on guide from first module to hardened multi-platform distribution is in
+[`docs/`](docs/README.md). The byte-level reference is [`spec/`](spec/00-overview.md).
+
 ## Quick start
 
 Requires a stable Rust toolchain. The tests also need `gcc`.
