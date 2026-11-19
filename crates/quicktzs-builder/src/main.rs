@@ -53,7 +53,7 @@ fn prompt(label: &str) -> Result<String, BuildError> {
 }
 
 fn passphrase(confirm: bool) -> Result<Vec<u8>, BuildError> {
-    let p = match std::env::var("QUICKTZS_PASSPHRASE").or_else(|_| std::env::var("TUNPAK_PASSPHRASE")) /* TUNPAK_* kept for compatibility */ {
+    let p = match std::env::var("QUICKTZS_PASSPHRASE") {
         Ok(p) => p,
         Err(_) => {
             let p = prompt("passphrase: ")?;
@@ -282,10 +282,15 @@ fn dev_run(args: &[String]) -> i32 {
     let (stdout, stderr, stdin) = (std::io::stdout(), std::io::stderr(), std::io::stdin());
     let (mut o, mut e, mut i) = (stdout.lock(), stderr.lock(), stdin.lock());
     let mut io = exectzs::Io { out: &mut o, err: &mut e, input: &mut i };
+    if main.is_dir() && !main.join("main.tun").is_file() {
+        eprintln!("error: no main.tun in '{}' (expected a .tun/.tzst file or a module directory)", main.display());
+        return 1;
+    }
     let res = if main.extension().is_some_and(|e| e == "tzst") {
         dev::dev_run_script(&main, &opts, &mut io)
     } else {
         let dir = match main.parent() {
+            _ if main.is_dir() => main.clone(),
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
         };

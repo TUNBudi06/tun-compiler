@@ -253,7 +253,10 @@ impl<'a> P<'a> {
                 while i < cs.len() {
                     let c = cs[i];
                     let name_end = |from: usize| (from..cs.len()).find(|&j| !idc(cs[j])).unwrap_or(cs.len());
-                    if c == '\\' && i + 1 < cs.len() {
+                    if c == '\\' && cs.get(i + 1) == Some(&'x') {
+                        lit.push(crate::lexer::x_escape(&cs, i + 1).map_err(|m| err(&a, m))?);
+                        i += 4;
+                    } else if c == '\\' && i + 1 < cs.len() {
                         lit.push(match cs[i + 1] { 'n' => '\n', 't' => '\t', 'r' => '\r', '0' => '\0', o => o });
                         i += 2;
                     } else if c == '{' {

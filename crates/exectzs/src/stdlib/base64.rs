@@ -40,6 +40,9 @@ pub fn decode(s: &str) -> Result<Vec<u8>, String> {
             };
             n = n << 6 | v;
         }
+        if pad > 0 && n & ((1 << (pad * 8)) - 1) != 0 {
+            return Err("base64 decode: non-canonical trailing bits".into());
+        }
         out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
     }
     Ok(out)
@@ -66,6 +69,8 @@ mod tests {
         assert!(decode("Zm9").is_err());
         assert!(decode("Zg==Zg==").is_err());
         assert!(decode("Z===").is_err());
+        assert_eq!(decode("Zh==").unwrap_err(), "base64 decode: non-canonical trailing bits");
+        assert!(decode("Zm9=").is_err());
         let all: Vec<u8> = (0..=255).collect();
         assert_eq!(decode(&encode(&all)).unwrap(), all);
     }

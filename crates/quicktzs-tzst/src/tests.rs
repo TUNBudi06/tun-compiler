@@ -625,3 +625,48 @@ fn opt_break_continue_regions_survive_fused_while() {
 fn ok_opt(src: &str) -> TzstOutput {
     compile_tzst(src, Width::W4).unwrap_or_else(|e| panic!("{e}\n{src}"))
 }
+
+// ---- audit fixes: \xNN, builtin-named fns, temp slots, tuple width
+
+#[test]
+fn x_escape_ascii_ok_high_rejected() {
+    let o = ok("start { print \"\\x41\"; }");
+    assert!(o.file.tun.consts.contains(&Const::Str("A".into())));
+    for s in ["\\xff", "\\x80"] {
+        let e = c(&format!("start {{ print \"{s}\"; }}")).unwrap_err();
+        assert!(e.msg.contains("above \\x7f") && e.msg.contains("hex.decode"), "{e}");
+        let e = c(&format!("start {{ print f\"a {s}\"; }}")).unwrap_err();
+        assert!(e.msg.contains("above \\x7f"), "fstring {e}");
+        let e = c(&format!("start {{ let @a = 1; print f\"{{ \\\"{s}\\\" }}\"; }}")).unwrap_err();
+        assert!(e.msg.contains("above \\x7f"), "fstring nested {e}");
+    }
+    let o = ok("start { print f\"\\x41\"; }");
+    assert!(o.file.tun.consts.contains(&Const::Str("A".into())));
+    assert!(c("start { print \"\\x4\"; }").is_err());
+}
+
+#[test]
+fn user_fn_named_like_builtin_is_rejected() {
+    for n in ["str", "int", "hex", "typeof", "len", "hex_range", "print"] {
+        let e = c(&format!("fn {n}(@a, @b, @c) {{ return @a; }}\nstart {{ halt; }}")).unwrap_err();
+        assert!(e.msg.contains("is a built-in and cannot be used as a function name"), "{n}: {e}");
+    }
+}
+
+#[test]
+fn big_array_literal_compiles() {
+    let xs = (0..250).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    ok(&format!("start {{ let @a = [{xs}]; print len(@a); }}"));
+    let big = (0..2000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    ok(&format!("start {{ let @a = [{big}]; print len(@a); }}"));
+    let ob = (0..400).map(|i| format!("\"k{i}\": {i} + 1")).collect::<Vec<_>>().join(", ");
+    ok(&format!("start {{ let @a = {{{ob}}}; print len(@a); }}"));
+    let nest = (0..400).map(|i| format!("[{i}, \"x\"]")).collect::<Vec<_>>().join(", ");
+    ok(&format!("start {{ let @a = [{nest}]; print len(@a); }}"));
+}
+
+#[test]
+fn tuple_over_255_is_an_error() {
+    let e = c(&format!("fn f() {{ return ({}); }}\nstart {{ halt; }}", (0..256).map(|_| "1").collect::<Vec<_>>().join(", "))).unwrap_err();
+    assert!(e.msg.contains("255"), "{e}");
+}

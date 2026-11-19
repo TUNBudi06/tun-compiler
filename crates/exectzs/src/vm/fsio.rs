@@ -330,6 +330,7 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
         }
         drop(f);
         std::fs::rename(&tmp, p).map_err(|e| format!("cannot write '{shown}': {e}"))?;
+        fsync_parent(p);
         Ok(())
     })();
     if res.is_err() {
@@ -339,6 +340,16 @@ pub fn write_atomic(p: &Path, shown: &str, data: &[u8], off: u64, deadline: Inst
     keep_dirs(&made);
     crate::sandbox::untrack_tmp(&tmp);
     res
+}
+
+/// Best-effort: make a rename durable by fsyncing the target's parent dir. Never fails the write.
+fn fsync_parent(p: &Path) {
+    if let Some(d) = p.parent() {
+        let d = if d.as_os_str().is_empty() { Path::new(".") } else { d };
+        if let Ok(f) = std::fs::File::open(d) {
+            let _ = f.sync_all();
+        }
+    }
 }
 
 /// `lwrite`: replace the `slot` bytes at `off` with `data` (padded with `fill`; longer data is cut in
@@ -406,6 +417,7 @@ pub fn write_slot(
         let _ = f.set_permissions(meta.permissions());
         drop(f);
         std::fs::rename(&tmp, p).map_err(io)?;
+        fsync_parent(p);
         Ok(())
     })();
     if res.is_err() {
@@ -566,15 +578,20 @@ impl Appends {
         Ok(())
     }
 
-    /// fsync + rename every staged temp over its target. On the first failure the rest are discarded.
+    /// fsync every staged temp, then rename them all (the partial-failure window is only the renames).
+    /// On the first failure the rest are discarded by Drop.
     pub fn commit(&mut self) -> R<()> {
-        for mut s in std::mem::take(&mut self.0) {
+        let mut all = std::mem::take(&mut self.0);
+        for s in &mut all {
             let io = |e: std::io::Error| format!("cannot write '{}': {e}", s.path.display());
             s.file.sync_all().map_err(io)?;
             if let Some(m) = &s.perm {
                 let _ = s.file.set_permissions(m.clone()); // undo umask narrowing
             }
-            std::fs::rename(&s.tmp, &s.path).map_err(io)?;
+        }
+        for s in &mut all {
+            std::fs::rename(&s.tmp, &s.path).map_err(|e| format!("cannot write '{}': {e}", s.path.display()))?;
+            fsync_parent(&s.path);
             keep_dirs(&s.dirs);
             s.dirs.clear();
         }
@@ -605,6 +622,18 @@ mod tests {
         a.append(&d.join("new/b.bin"), "b", b"y", dl()).unwrap();
         drop(a);
         assert!(!d.join("new").exists());
+    }
+
+    #[test]
+    fn commit_renames_all_staged() {
+        let d = dir("commit_all");
+        std::fs::write(d.join("a"), b"old").unwrap();
+        let mut a = Appends::default();
+        a.append(&d.join("a"), "a", b"+1", dl()).unwrap();
+        a.append(&d.join("sub/b"), "b", b"two", dl()).unwrap();
+        a.commit().unwrap();
+        assert_eq!(std::fs::read(d.join("a")).unwrap(), b"old+1");
+        assert_eq!(std::fs::read(d.join("sub/b")).unwrap(), b"two");
     }
 
     #[test]

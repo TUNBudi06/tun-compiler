@@ -43,6 +43,20 @@ fn remove_tracked_tmps() {
         let _ = std::fs::remove_dir(d);
     }
 }
+/// Signal watcher and panic hook (panic=abort skips Drop): kill children, remove tmps and private dirs.
+/// Must not panic (it may run inside the panic hook), hence the lock().map().unwrap_or_default() pattern.
+fn cleanup_all() {
+    cleanup(&PIDS, &DIRS);
+}
+fn cleanup(pids: &Mutex<Vec<u32>>, dirs: &Mutex<Vec<PathBuf>>) {
+    for pid in pids.lock().map(|p| p.clone()).unwrap_or_default() {
+        kill_group(pid);
+    }
+    remove_tracked_tmps();
+    for d in dirs.lock().map(|d| d.clone()).unwrap_or_default() {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
 static SIG_PIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn on_signal(sig: libc::c_int) {
@@ -58,7 +72,7 @@ pub fn install_signal_cleanup() {
     // release builds use panic=abort: the hook still runs before the abort
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |i| {
-        remove_tracked_tmps();
+        cleanup_all();
         prev(i)
     }));
     let mut fds = [0; 2];
@@ -74,13 +88,7 @@ pub fn install_signal_cleanup() {
     std::thread::spawn(move || {
         let mut b = 0u8;
         while unsafe { libc::read(r, &mut b as *mut u8 as *mut _, 1) } != 1 {}
-        for pid in PIDS.lock().map(|p| p.clone()).unwrap_or_default() {
-            kill_group(pid);
-        }
-        remove_tracked_tmps();
-        for d in DIRS.lock().map(|d| d.clone()).unwrap_or_default() {
-            let _ = std::fs::remove_dir_all(d);
-        }
+        cleanup_all();
         let sig = b as i32;
         unsafe { libc::_exit(if sig == libc::SIGINT { crate::EXIT_CANCELLED } else { 128 + sig }) };
     });
@@ -153,5 +161,24 @@ impl Drop for ChildGuard {
         // (A reaped pid could in theory be reused; the group kill then hits nothing or ESRCH.)
         kill_group(self.0.id());
         let _ = self.0.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cleanup_removes_tracked_tmp_and_dirs() {
+        let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!("qtz-cleanup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("t.tmp");
+        std::fs::write(&f, b"x").unwrap();
+        let g = d.join("sub");
+        std::fs::create_dir_all(g.join("in")).unwrap();
+        track_tmp(&f);
+        cleanup(&Mutex::new(vec![]), &Mutex::new(vec![g.clone()]));
+        assert!(!f.exists() && !g.exists());
+        untrack_tmp(&f);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

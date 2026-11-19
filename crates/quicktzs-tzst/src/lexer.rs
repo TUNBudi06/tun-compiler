@@ -59,7 +59,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
         let err = |m: String| CompileError::new(l0, c0, m);
         if c.is_whitespace() {
             adv!();
-        } else if c == '#' {
+        } else if c == '#' || (c == '/' && cs.get(i + 1) == Some(&'/')) {
             while i < cs.len() && cs[i] != '\n' {
                 adv!();
             }
@@ -196,12 +196,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                         '\\' => s.push('\\'),
                         '"' => s.push('"'),
                         'x' => {
-                            let h: String = cs.iter().skip(i + 1).take(2).collect();
-                            let v = u8::from_str_radix(&h, 16)
-                                .ok()
-                                .filter(|_| h.len() == 2 && v_ascii(&h))
-                                .ok_or_else(|| err("bad \\x escape".into()))?;
-                            s.push(v as char);
+                            s.push(x_escape(&cs, i).map_err(|m| err(m))?);
                             adv!();
                             adv!();
                         }
@@ -227,6 +222,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
         }
     }
     Ok(out)
+}
+
+/// `\xNN` escape; `cs[i]` is the `x`. Strings are UTF-8, so only 0x00-0x7F can be written.
+pub(crate) fn x_escape(cs: &[char], i: usize) -> Result<char, String> {
+    let h: String = cs.iter().skip(i + 1).take(2).collect();
+    let v = u8::from_str_radix(&h, 16).ok().filter(|_| h.len() == 2 && v_ascii(&h)).ok_or("bad \\x escape")?;
+    if v >= 0x80 {
+        return Err("\\xNN above \\x7f can't go in a string (strings are UTF-8 text) \u{2014} build raw bytes with hex.decode(\"..\")".into());
+    }
+    Ok(v as char)
 }
 
 fn v_ascii(h: &str) -> bool {
@@ -273,6 +278,17 @@ mod tests {
         assert!(lex("\"abc").is_err());
         assert!(lex("f\"abc").is_err());
         assert!(lex("`").is_err());
+    }
+    #[test]
+    fn slash_slash_comments() {
+        use Tok::*;
+        assert_eq!(toks("// c\nfoo"), vec![Ident("foo".into())]);
+        assert_eq!(toks("a; // note\nb"), toks("a;\nb"));
+        assert_eq!(toks("a // eof"), vec![Ident("a".into())]);
+        assert_eq!(toks("\"a//b\""), vec![Str("a//b".into())]);
+        assert_eq!(toks("f\"a//b\""), vec![FStr("a//b".into())]);
+        assert_eq!(toks("7 / 2"), toks("7 / 2 # x"));
+        assert!(toks("7 / 2").len() == 3);
     }
     #[test]
     fn positions() {

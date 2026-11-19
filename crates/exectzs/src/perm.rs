@@ -132,7 +132,8 @@ pub fn render_manifest(d: &Dict) -> String {
 
 fn read_answer(io: &mut Io) -> String {
     let mut line = String::new();
-    let _ = io.input.read_line(&mut line); // EOF / error -> empty -> deny
+    // Bounded: a yes/no answer is tiny; an over-long line cannot match y/yes and so denies.
+    let _ = std::io::BufRead::read_line(&mut std::io::Read::take(&mut *io.input, 256), &mut line); // EOF / error -> empty -> deny
     line.trim().to_ascii_lowercase()
 }
 
@@ -192,5 +193,20 @@ pub fn confirm_run(
             Ok(())
         }
         _ => Err(ExecError::new(EXIT_PERM_DENIED, format!("{}{}{}", ob!("RUN of '"), escape(&row.path), ob!("' denied by user")))),
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    #[test]
+    fn answer_read_is_bounded() {
+        let mut inp = std::io::Cursor::new(format!("{}\n", "y".repeat(100_000)).into_bytes());
+        let (mut o, mut e) = (Vec::new(), Vec::new());
+        let a = read_answer(&mut Io { out: &mut o, err: &mut e, input: &mut inp });
+        assert!(a.len() <= 256 && a != "y" && a != "yes");
+        assert!(inp.position() <= 256);
+        let mut inp = std::io::Cursor::new(b"Yes\n".to_vec());
+        assert_eq!(read_answer(&mut Io { out: &mut o, err: &mut e, input: &mut inp }), "yes");
     }
 }

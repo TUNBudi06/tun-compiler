@@ -16,10 +16,11 @@ pub fn handle_key(data: &Path, body: &[u8]) -> (Resp, Option<u32>) {
     // app_id is formatted as a decimal number: request bytes never become a path component.
     let dir = data.join("apps").join(app_id.to_string());
     let h = sha256(license.as_bytes());
-    let ok = std::fs::read_to_string(dir.join("licenses")).is_ok_and(|s| {
-        // `|` not `||`: no early exit on a match.
-        s.lines().fold(false, |acc, l| acc | hex32(l.trim()).is_some_and(|x| hash_eq(&x, &h)))
-    });
+    // Always read + fold, even for an unknown app (read error = empty): no app-existence timing signal.
+    // Residual (license line COUNT timing) is acceptable behind the TLS proxy (see `shortcut:` note).
+    let s = std::fs::read_to_string(dir.join("licenses")).unwrap_or_default();
+    // `|` not `||`: no early exit on a match.
+    let ok = s.lines().fold(false, |acc, l| acc | hex32(l.trim()).is_some_and(|x| hash_eq(&x, &h)));
     // Unknown app and bad license share one body so apps cannot be enumerated.
     if !ok {
         return (text(403, "license rejected"), Some(app_id));

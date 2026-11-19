@@ -106,6 +106,7 @@ pub fn spawn(p: &Prepared, piped_stdout: bool) -> Result<ChildGuard, ExecError> 
         if piped_stdout {
             c.stdout(Stdio::piped());
         }
+        c.env_remove("QUICKTZS_LICENSE"); // the child never needs the license
         match c.spawn() {
             Ok(c) => return Ok(ChildGuard::new(c)),
             // ETXTBSY: another thread's fork briefly inherited our write fd; retry.
@@ -139,4 +140,17 @@ pub fn run(
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
     Ok(st.code().or_else(|| st.signal().map(|s| 128 + s)).unwrap_or(EXIT_ERROR))
+}
+
+#[cfg(test)]
+mod env_tests {
+    #[test]
+    fn license_env_is_scrubbed() {
+        std::env::set_var("QUICKTZS_LICENSE", "secret");
+        let p = super::Prepared { exe: "/usr/bin/env".into(), argv: vec![], shown: "env".into() };
+        let mut g = super::spawn(&p, true).unwrap();
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut g.0.stdout.take().unwrap(), &mut out).unwrap();
+        assert!(!out.contains("QUICKTZS_LICENSE"), "{out}");
+    }
 }

@@ -953,7 +953,10 @@ impl P<'_> {
                     parts.push(FPart::Lit(std::mem::take(lit)));
                 }
             };
-            if c == '\\' && i + 1 < cs.len() {
+            if c == '\\' && cs.get(i + 1) == Some(&'x') {
+                lit.push(crate::lexer::x_escape(&cs, i + 1).map_err(|m| err(t, m))?);
+                i += 4;
+            } else if c == '\\' && i + 1 < cs.len() {
                 lit.push(match cs[i + 1] {
                     'n' => '\n',
                     't' => '\t',

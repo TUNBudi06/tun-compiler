@@ -254,9 +254,13 @@ impl Gen {
             }
             EK::FStr(parts) => self.fstr_value(parts),
             EK::Arr(_) | EK::Obj(_) => {
+                let m = self.sc.temps.len();
                 let t = self.temp()?;
                 self.build(e, t)?;
-                self.ins(O::PushVar, &[Arg::Var(t)])
+                self.ins(O::PushVar, &[Arg::Var(t)])?;
+                // value is on the stack now; free the slot so sibling literals don't pile up against 255
+                self.release(m);
+                Ok(())
             }
             EK::Tuple(xs) => {
                 for x in xs {
@@ -680,7 +684,8 @@ impl Gen {
             SK::Let(n, e) | SK::Assign(n, e) => self.into(e, Dest::Name(n)),
             SK::LetTuple(ns, e) => {
                 self.push(e)?;
-                self.ins(O::Unpack, &[Arg::U8(ns.len() as u8)])?;
+                let n = u8::try_from(ns.len()).map_err(|_| self.err("tuple has more than 255 elements"))?;
+                self.ins(O::Unpack, &[Arg::U8(n)])?;
                 for n in ns {
                     let v = self.def(n)?;
                     self.ins(O::Store, &[Arg::Var(v)])?;
@@ -772,7 +777,8 @@ impl Gen {
                     for x in xs {
                         self.push(x)?;
                     }
-                    self.ins(O::TupleNew, &[Arg::U8(xs.len() as u8)])?;
+                    let n = u8::try_from(xs.len()).map_err(|_| self.err("tuple has more than 255 elements"))?;
+                    self.ins(O::TupleNew, &[Arg::U8(n)])?;
                     self.ins(O::Ret, &[Arg::Src(Src::Stack)])
                 } else {
                     let s = self.src(e)?;

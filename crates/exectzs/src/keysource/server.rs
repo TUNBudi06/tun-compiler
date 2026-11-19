@@ -84,6 +84,8 @@ fn post(url: &str, app_id: u32, license: &[u8], total: Duration) -> Result<(u16,
         ctl.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
         match s.read(&mut buf) {
             Ok(0) => break,
+            // TLS peer closed without close_notify: treat as EOF; the Content-Length check below still rejects truncation.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Ok(n) => raw.extend_from_slice(&buf[..n]),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(ob!("key server timed out").into()),
             Err(e) => return Err(e.to_string()),

@@ -60,6 +60,9 @@ pub fn sigs(p: &Program, tables: &[LibTable]) -> Res<Sigs> {
         s.libs.insert(imp.alias.clone(), (i as u8, t.clone()));
     }
     for f in &p.fns {
+        if f.name == "print" || BUILTIN_CALLS.iter().any(|(n, _)| *n == f.name) {
+            return Err(CompileError::new(f.pos.0, f.pos.1, format!("'{}' is a built-in and cannot be used as a function name", f.name)));
+        }
         if s.fns.insert(f.name.clone(), (f.params.len(), f.rets.len())).is_some() {
             return Err(CompileError::new(f.pos.0, f.pos.1, format!("duplicate function '{}'", f.name)));
         }

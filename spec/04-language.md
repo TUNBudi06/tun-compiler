@@ -99,9 +99,10 @@ let @obj = {"name": "budi", "age": 25};
 
 @x = @a + @b * @c;
 @x = @a % @b;
-@x = @a xor @key;        # bitwise
+@x = @a xor @key;        # bitwise (bitwise ops: & | ~ xor shl shr)
+@m = @a & 3;             # bitwise AND: 6 & 3 == 2
 @x = @a shl 2;
-@flag = @a > 0 and @b < 10;   # logical (short-circuit)
+@flag = @a > 0 and @b < 10;   # logical `and`/`or`/`not`: short-circuit, always yield 1 or 0 (NOT bitwise)
 @n = -@x;                      # negate
 ```
 
@@ -128,7 +129,7 @@ let @c     = trim @input;
 let @n     = int(@s);          # cast; int("abc") = 0
 let @s2    = str(@n);
 let @h     = hex(@buf);        # small buffers; big → hex_range
-let @t     = typeof(@x);       # "int" / "object" / ...
+let @t     = typeof(@x);       # "int" / "str" / "buf" / "arr" / "object" / "tuple"
 ```
 
 ### Arrays / objects / tuples
