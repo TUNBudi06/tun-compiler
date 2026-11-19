@@ -350,7 +350,9 @@ fn lib_import_builds_and_runs() {
         let (h, _) = PakHeader::parse(&pak).unwrap();
         let (dict, _) = Dict::parse(&pak[h.dict_offset as usize..]).unwrap();
         let lib = dict.entries.iter().find(|e| e.path == "lib/mini.so").unwrap();
-        assert_eq!((lib.arch as u8, lib.platform as u8), (1, 1));
+        // the lib is built by the host gcc, so its arch is the host arch (X64=1, Arm64=2); platform is linux=1
+        let want_arch = if cfg!(target_arch = "aarch64") { 2 } else { 1 };
+        assert_eq!((lib.arch as u8, lib.platform as u8), (want_arch, 1));
         let r = run(&pak, &release(trust(&a, encrypt)), "");
         assert!(r.ok(), "{:?} {}", r.res, r.err);
         assert!(r.out.ends_with("42\nABC\n"), "{:?}", r.out);
