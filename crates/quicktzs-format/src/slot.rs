@@ -165,15 +165,17 @@ pub fn text_hash(bin: &[u8]) -> Option<[u8; 32]> {
     Some(Sha256::digest(&bin[elf_text_range(bin)?]).into())
 }
 
-/// Offset of the (single) slot magic in a template binary.
+/// Offset of the (single) real slot in a template binary. A stray copy of the magic
+/// (e.g. a rodata literal on aarch64) is ignored: it has no room or its body fails the checksum.
 pub fn find_slot(bin: &[u8]) -> Result<usize, FormatError> {
-    let mut hits = bin.windows(SLOT_MAGIC.len()).enumerate().filter(|(_, w)| *w == SLOT_MAGIC).map(|(i, _)| i);
-    let first = hits.next().ok_or(FormatError::BadMagic { what: "executor config slot (not an exectzs template?)" })?;
-    if hits.next().is_some() {
+    let mut real = bin
+        .windows(SLOT_MAGIC.len())
+        .enumerate()
+        .filter(|(i, w)| *w == SLOT_MAGIC && i + SLOT_SIZE <= bin.len() && SlotConfig::from_body(&bin[i + SLOT_MAGIC.len()..i + SLOT_SIZE]).is_ok())
+        .map(|(i, _)| i);
+    let first = real.next().ok_or(FormatError::BadMagic { what: "executor config slot (not an exectzs template?)" })?;
+    if real.next().is_some() {
         return Err(FormatError::Invalid { what: "template", detail: "config slot magic appears more than once".into() });
-    }
-    if first + SLOT_SIZE > bin.len() {
-        return Err(FormatError::Truncated { what: "config slot", offset: first });
     }
     Ok(first)
 }
@@ -256,5 +258,41 @@ mod tests {
         patch(&mut bin, &cfg()).unwrap();
         let at = find_slot(&bin).unwrap();
         assert_eq!(SlotConfig::from_body(&bin[at + 8..at + SLOT_SIZE]).unwrap(), Some(cfg()));
+    }
+
+    #[test]
+    fn stray_magic_is_ignored() {
+        // short truncated-looking stray, then a real blank slot
+        let mut bin = vec![0x11u8; 64];
+        bin.extend_from_slice(&SLOT_MAGIC);
+        bin.extend_from_slice(&[0xFF; 32]);
+        bin.extend_from_slice(&[0x33; 40]);
+        let real = bin.len();
+        bin.extend_from_slice(&SLOT_MAGIC);
+        bin.extend_from_slice(&[0; SLOT_BODY]);
+        bin.extend_from_slice(&[0x22; 64]);
+        assert_eq!(find_slot(&bin).unwrap(), real);
+        patch(&mut bin, &cfg()).unwrap();
+        assert_eq!(SlotConfig::from_body(&bin[real + 8..real + SLOT_SIZE]).unwrap(), Some(cfg()));
+
+        // stray with full room but an invalid body
+        assert!(SlotConfig::from_body(&[0xFF; SLOT_BODY]).is_err());
+        let mut bin = vec![0x11u8; 64];
+        bin.extend_from_slice(&SLOT_MAGIC);
+        bin.extend_from_slice(&[0xFF; SLOT_BODY]);
+        let real = bin.len();
+        bin.extend_from_slice(&SLOT_MAGIC);
+        bin.extend_from_slice(&[0; SLOT_BODY]);
+        assert_eq!(find_slot(&bin).unwrap(), real);
+    }
+
+    #[test]
+    fn two_valid_slots_error() {
+        let mut bin = Vec::new();
+        for _ in 0..2 {
+            bin.extend_from_slice(&SLOT_MAGIC);
+            bin.extend_from_slice(&[0; SLOT_BODY]);
+        }
+        assert!(matches!(find_slot(&bin), Err(FormatError::Invalid { .. })));
     }
 }
