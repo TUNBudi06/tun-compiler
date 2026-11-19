@@ -268,7 +268,20 @@ struct P<'a> {
 const MAX_NEST: usize = 64;
 const MAX_TREE: usize = 200;
 
+/// Runs the recursive-descent parse on a big-stack thread so the depth caps fire before any
+/// architecture's debug frames can overflow a small (e.g. test-harness) stack.
 pub fn parse(src: &str) -> Res<Program> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(s, || parse_inner(src))
+            .expect("spawn parser thread")
+            .join()
+            .unwrap_or_else(|_| Err(CompileError::new(1, 1, "parser stack exhausted")))
+    })
+}
+
+fn parse_inner(src: &str) -> Res<Program> {
     let toks = lex(src)?;
     let user_fns = toks.windows(2).filter_map(|w| match (&w[0].tok, &w[1].tok) {
         (Tok::Ident(f), Tok::Ident(n)) if f == "fn" => Some(n.clone()),

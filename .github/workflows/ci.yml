@@ -49,7 +49,14 @@ jobs:
             target
           key: android-check-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: android-check-
-      - run: cargo install cargo-ndk --locked
-      - name: Compile-check exectzs
-        # Use the runner's pinned NDK (ANDROID_NDK_ROOT, an r27 LTS); cargo-ndk 4.x panics on the newer r30 at ANDROID_NDK_LATEST_HOME.
-        run: ANDROID_NDK_HOME="$ANDROID_NDK_ROOT" cargo ndk -t arm64-v8a -p 24 build --locked -p exectzs
+      - name: Compile-check exectzs (NDK clang)
+        # Cross-compile straight to aarch64-linux-android with the NDK's clang as linker/CC.
+        # (cargo-ndk 4.x panics on these runners; the direct toolchain is simpler and stable.)
+        # API 24 clang wrapper; RUSTFLAGS sets 16 KB max page size for Android 15+.
+        run: |
+          TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TC/llvm-ar"
+          export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+          cargo build --locked -p exectzs --target aarch64-linux-android
