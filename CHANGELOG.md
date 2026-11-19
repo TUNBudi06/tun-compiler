@@ -4,6 +4,16 @@ All changes to QuickTZS (formerly TunPak), newest first. The project has no rele
 Each entry names the commit it came from. "Compatibility" notes list anything that changes how
 existing modules build or run.
 
+## Unreleased
+
+### Changed: finish the QuickTZS rename (BREAKING)
+- Native lib ABI symbols renamed `tunpak_*` -> `qtz_*` (`qtz_abi_version`, `qtz_lfnt`, `qtz_call`,
+  `qtz_free`). Existing native libs must be rebuilt with the new export names.
+- Entry-key derivation string changed from `tunpak-entry-key-v1` to `qtz-entry-key-v1`. Existing
+  encrypted paks will no longer decrypt; re-encrypt them with the new build.
+- Removed the `TUNPAK_PASSPHRASE` and `TUNPAK_LICENSE` env fallbacks; use `QUICKTZS_PASSPHRASE` and
+  `QUICKTZS_LICENSE`.
+
 ## 2026-11-18
 
 ### Added: `.text` self-hash + spread gate (`431f09b`)

@@ -3,7 +3,7 @@
 pub const MAGIC_TUN: [u8; 4] = *b"LTZS";
 pub const MAGIC_PAK: [u8; 4] = *b"QTZS";
 pub const MAGIC_DICT: [u8; 4] = *b"TTZS";
-// Pre-rename (TunPak era) magics: accepted on read for compatibility, never written.
+// Legacy pre-rename magics: accepted on read for compatibility, never written.
 pub const MAGIC_TUN_V0: [u8; 4] = *b"TUN\0";
 pub const MAGIC_PAK_V0: [u8; 4] = *b"TZS\0";
 pub const MAGIC_DICT_V0: [u8; 4] = *b"DICT";

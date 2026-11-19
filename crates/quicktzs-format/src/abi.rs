@@ -8,9 +8,9 @@
 //! - Only none/int/str/buf cross the boundary (arr/object/tuple give a runtime error in the VM before the call).
 //! - str is UTF-8, no NUL terminator, passed as `ptr` + `len`.
 //! - Argument memory is owned by the caller and valid only during the call.
-//! - A returned str/buf is owned by the lib until the host calls `tunpak_free(ptr, len)`.
+//! - A returned str/buf is owned by the lib until the host calls `qtz_free(ptr, len)`.
 //! - Libs must not unwind across the boundary.
-//! - `tunpak_call` returns 0 on success; non-zero on error, with `ret` holding a Str message or None.
+//! - `qtz_call` returns 0 on success; non-zero on error, with `ret` holding a Str message or None.
 //!
 //! Minimal C example (also at `tests/fixtures/minimal_lib.c`; C names the `int` field `int_`):
 //!
@@ -28,11 +28,11 @@
 //!   1,0, 1, 2, 5,'u','p','p','e','r'
 //! };
 //!
-//! uint32_t tunpak_abi_version(void) { return 1; }
+//! uint32_t qtz_abi_version(void) { return 1; }
 //!
-//! const uint8_t *tunpak_lfnt(size_t *len_out) { *len_out = sizeof LFNT; return LFNT; }
+//! const uint8_t *qtz_lfnt(size_t *len_out) { *len_out = sizeof LFNT; return LFNT; }
 //!
-//! int32_t tunpak_call(uint16_t fn_id, const TpVal *args, uint8_t argc, TpVal *ret) {
+//! int32_t qtz_call(uint16_t fn_id, const TpVal *args, uint8_t argc, TpVal *ret) {
 //!   ret->tag = 0; ret->int_ = 0; ret->ptr = NULL; ret->len = 0;
 //!   if (fn_id == 0 && argc == 2 && args[0].tag == 1 && args[1].tag == 1) {
 //!     ret->tag = 1; ret->int_ = args[0].int_ + args[1].int_; return 0;
@@ -49,19 +49,19 @@
 //!   return 2;
 //! }
 //!
-//! void tunpak_free(uint8_t *ptr, size_t len) { (void)len; free(ptr); }
+//! void qtz_free(uint8_t *ptr, size_t len) { (void)len; free(ptr); }
 //! ```
 
 pub const ABI_VERSION: u32 = 1;
 
 /// `extern "C" fn() -> u32`
-pub const SYM_ABI_VERSION: &str = "tunpak_abi_version";
+pub const SYM_ABI_VERSION: &str = "qtz_abi_version";
 /// `extern "C" fn(len_out: *mut usize) -> *const u8` - static LFNT bytes (spec/01 section 7), valid for the life of the lib.
-pub const SYM_LFNT: &str = "tunpak_lfnt";
+pub const SYM_LFNT: &str = "qtz_lfnt";
 /// `extern "C" fn(fn_id: u16, args: *const TpVal, argc: u8, ret: *mut TpVal) -> i32`
-pub const SYM_CALL: &str = "tunpak_call";
+pub const SYM_CALL: &str = "qtz_call";
 /// `extern "C" fn(ptr: *mut u8, len: usize)` - frees a buffer the lib returned in `ret`.
-pub const SYM_FREE: &str = "tunpak_free";
+pub const SYM_FREE: &str = "qtz_free";
 
 pub const TP_NONE: u8 = 0;
 pub const TP_INT: u8 = 1;

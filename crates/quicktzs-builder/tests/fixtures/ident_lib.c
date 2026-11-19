@@ -8,10 +8,10 @@ typedef struct { uint8_t tag; int64_t int_; const uint8_t *ptr; size_t len; } Tp
 
 static const uint8_t LFNT[] = { 'L','F','N','T', 1,0, 0,0, 1, 3, 10,'d','e','c','o','m','p','r','e','s','s' };
 
-uint32_t tunpak_abi_version(void) { return 1; }
-const uint8_t *tunpak_lfnt(size_t *len_out) { *len_out = sizeof LFNT; return LFNT; }
+uint32_t qtz_abi_version(void) { return 1; }
+const uint8_t *qtz_lfnt(size_t *len_out) { *len_out = sizeof LFNT; return LFNT; }
 
-int32_t tunpak_call(uint16_t fn_id, const TpVal *args, uint8_t argc, TpVal *ret) {
+int32_t qtz_call(uint16_t fn_id, const TpVal *args, uint8_t argc, TpVal *ret) {
     ret->tag = 0; ret->int_ = 0; ret->ptr = NULL; ret->len = 0;
     if (fn_id == 0 && argc == 1 && args[0].tag == 3) {
         uint8_t *p = malloc(args[0].len ? args[0].len : 1);
@@ -22,4 +22,4 @@ int32_t tunpak_call(uint16_t fn_id, const TpVal *args, uint8_t argc, TpVal *ret)
     return 2;
 }
 
-void tunpak_free(uint8_t *ptr, size_t len) { (void)len; free(ptr); }
+void qtz_free(uint8_t *ptr, size_t len) { (void)len; free(ptr); }

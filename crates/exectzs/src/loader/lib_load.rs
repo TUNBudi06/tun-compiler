@@ -121,7 +121,7 @@ impl LoadedLib {
         // SAFETY: `raw` points into `args`, which outlives the call; `ret` is a valid out-pointer;
         // argc fits u8 because arg_count is a u8 and equals args.len().
         let rc = unsafe { (self.call)(fn_id, raw.as_ptr(), raw.len() as u8, &mut ret) };
-        // Copy out first, then free: the lib owns `ret.ptr` until `tunpak_free`.
+        // Copy out first, then free: the lib owns `ret.ptr` until `qtz_free`.
         let copied = self.take_ret(&ret);
         if rc != 0 {
             let msg = match (ret.tag, copied) {
@@ -149,7 +149,7 @@ impl LoadedLib {
                         Err("lib returned a null pointer with a non-zero length".into())
                     };
                 }
-                // SAFETY: per the ABI the lib returns `len` readable bytes at `ptr`, valid until tunpak_free.
+                // SAFETY: per the ABI the lib returns `len` readable bytes at `ptr`, valid until qtz_free.
                 let bytes = unsafe { std::slice::from_raw_parts(ret.ptr, ret.len) }.to_vec();
                 // SAFETY: (ptr,len) came from this lib's return value and is freed exactly once.
                 unsafe { (self.free)(ret.ptr as *mut u8, ret.len) };

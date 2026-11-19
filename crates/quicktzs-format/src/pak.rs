@@ -78,7 +78,7 @@ mod tests {
         let h = PakHeader { version: 1, dict_offset: 0x0102_0304 };
         h.serialize(&mut o).unwrap();
         assert_eq!(o, [b'Q', b'T', b'Z', b'S', 1, 4, 3, 2, 1]);
-        // old (TunPak-era) magic still parses, but is never written
+        // old (pre-rename) magic still parses, but is never written
         let mut old = o.clone();
         old[..4].copy_from_slice(&MAGIC_PAK_V0);
         assert_eq!(PakHeader::parse(&old).unwrap().0.dict_offset, 0x0102_0304);

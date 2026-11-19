@@ -1,6 +1,6 @@
 # QuickTZS — Binary Format
 
-> Old magic values (`TUN\0` for main.tun, `TZS\0` for the module, `DICT` for the dict) are still accepted on read, so files from the TunPak era keep loading. Writers emit only the new magic.
+> Old magic values (`TUN\0` for main.tun, `TZS\0` for the module, `DICT` for the dict) are still accepted on read, so files from before the rename keep loading. Writers emit only the new magic.
 
 All integers little-endian unless stated. `width` (ref width, 4 or 8 bytes) is set once
 per pak in the DICT header and applies to ALL entry refs (`LOAD`, `RUN`, `LOAD_SRV`,

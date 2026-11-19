@@ -315,7 +315,7 @@ mod tests {
         let mut o = vec![];
         d.serialize(&mut o).unwrap();
         assert_eq!(&o[..4], b"TTZS");
-        // old (TunPak-era) magic still parses
+        // old (pre-rename) magic still parses
         let mut old = o.clone();
         old[..4].copy_from_slice(&MAGIC_DICT_V0);
         assert_eq!(Dict::parse(&old).unwrap().0, d);

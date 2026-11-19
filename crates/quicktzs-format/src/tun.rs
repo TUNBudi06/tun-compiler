@@ -170,7 +170,7 @@ mod tests {
         example().serialize(&mut o).unwrap();
         assert_eq!(&o[..10], [0x4C, 0x54, 0x5A, 0x53, 0x01, 0x00, 0x04, 0x00, 0x05, 0x00]);
         assert_eq!(o.len(), 12 + 5 + 4);
-        // old (TunPak-era) magic still parses
+        // old (pre-rename) magic still parses
         let mut old = o.clone();
         old[..4].copy_from_slice(&MAGIC_TUN_V0);
         assert!(TunHeader::parse(&old).is_ok());

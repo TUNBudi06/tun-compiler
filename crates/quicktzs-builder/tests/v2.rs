@@ -337,7 +337,7 @@ fn lib_check_fails_cleanly() {
     put(&d, "empty.c", "int x;\n");
     if gcc(&d.join("empty.c"), &d.join("empty.so")) {
         let e = libs::lib_check(&d.join("empty.so")).unwrap_err().to_string();
-        assert!(e.contains("missing symbol 'tunpak_abi_version'"), "{e}");
+        assert!(e.contains("missing symbol 'qtz_abi_version'"), "{e}");
     }
 }
 

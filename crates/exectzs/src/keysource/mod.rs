@@ -48,5 +48,5 @@ pub fn entry_key(h: &DictHeader, trust: &Trust, license: Option<&str>, cache: &K
 
 /// `--license` first, then env `QUICKTZS_LICENSE`.
 pub fn license_from(opts: &RunOptions) -> Option<String> {
-    opts.license.clone().or_else(|| std::env::var("QUICKTZS_LICENSE").or_else(|_| std::env::var("TUNPAK_LICENSE")).ok()).filter(|s| !s.is_empty()) // TUNPAK_LICENSE kept for compatibility
+    opts.license.clone().or_else(|| std::env::var("QUICKTZS_LICENSE").ok()).filter(|s| !s.is_empty())
 }
