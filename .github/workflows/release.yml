@@ -1,5 +1,12 @@
 name: Release
 
+# One job per platform. Artifacts: quicktzs-<ver>-<target>.tar.gz (+ .sha256), attached to
+# the GitHub Release on v* tags. NOTE ON STATIC LINKING: exectzs dlopen()s native .so libs at
+# runtime, so it cannot be a fully-static (musl) binary -- a static binary has no dynamic loader
+# and dlopen() fails. The executor is therefore DYNAMIC (glibc on Linux, bionic on Termux). The
+# distributor tools (quicktzs, quicktzs-buildserver) do not dlopen and could be static musl if
+# ever wanted; today they ship as the same glibc build as the executor.
+
 on:
   push:
     branches: [main]
@@ -7,9 +14,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: build (${{ matrix.target }})
+  # ----- Linux (glibc): full toolchain -- builder, executor, build server -----
+  linux:
+    name: linux (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +39,6 @@ jobs:
             target
           key: ${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-release-
-      # glibc build (not musl): exectzs dlopen()s native .so libs.
       - run: cargo build --release --locked -p quicktzs-builder -p exectzs -p quicktzs-buildserver
       - name: Package
         id: pkg
@@ -56,5 +65,70 @@ jobs:
           files: |
             ${{ steps.pkg.outputs.name }}.tar.gz
             ${{ steps.pkg.outputs.name }}.tar.gz.sha256
+
+  # ----- Termux (Android, aarch64, bionic): executor only -----
+  # Only exectzs runs on a phone. dlopen + .so work on bionic. Cross-compiled with the NDK via
+  # cargo-ndk; rustls uses ring, which supports aarch64-linux-android. The distributor tools are
+  # Linux-only, so they are not built here.
+  termux:
+    name: termux (aarch64-linux-android, exectzs)
+    runs-on: ubuntu-latest
     permissions:
       contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: termux-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: termux-release-
+      - run: cargo install cargo-ndk --locked
+      - name: Build exectzs
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo ndk -t arm64-v8a -p 24 build --release --locked -p exectzs
+      - name: Package
+        id: pkg
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then ver="${GITHUB_REF_NAME}"; else ver="${GITHUB_SHA::7}"; fi
+          name="quicktzs-${ver}-aarch64-linux-android"
+          mkdir "$name"
+          cp target/aarch64-linux-android/release/exectzs README.md "$name/"
+          [ -f LICENSE ] && cp LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            ${{ steps.pkg.outputs.name }}.tar.gz
+            ${{ steps.pkg.outputs.name }}.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: |
+            ${{ steps.pkg.outputs.name }}.tar.gz
+            ${{ steps.pkg.outputs.name }}.tar.gz.sha256
+
+  # ----- Windows (x86_64): NOT YET SUPPORTED -----
+  # Placeholder. The executor is unix-only today: it uses dlopen/RTLD_* and loads lib/*.so, plus
+  # ptrace/PR_SET_DUMPABLE anti-attach. Windows needs LoadLibrary + .dll loading and a Windows
+  # anti-attach path before this can compile. Enable (and finish the Package step) once that lands.
+  #
+  # windows:
+  #   name: windows (x86_64-pc-windows-msvc, exectzs)
+  #   runs-on: windows-latest
+  #   permissions:
+  #     contents: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - run: cargo build --release --locked -p exectzs
+  #     # TODO: package exectzs.exe as quicktzs-<ver>-x86_64-pc-windows-msvc.zip (+ .sha256)
