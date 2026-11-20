@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "exectzs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "memchr",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "quicktzs-builder"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "exectzs",
  "libc",
@@ -383,14 +383,14 @@ dependencies = [
 
 [[package]]
 name = "quicktzs-buildserver"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "quicktzs-crypto",
 ]
 
 [[package]]
 name = "quicktzs-crypto"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -405,14 +405,14 @@ dependencies = [
 
 [[package]]
 name = "quicktzs-format"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "quicktzs-tzst"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "quicktzs-format",
 ]
