@@ -66,10 +66,11 @@ jobs:
             ${{ steps.pkg.outputs.name }}.tar.gz
             ${{ steps.pkg.outputs.name }}.tar.gz.sha256
 
-  # ----- Termux (Android, aarch64, bionic): executor only -----
-  # Only exectzs runs on a phone. dlopen + .so work on bionic. Cross-compiled with the NDK via
-  # cargo-ndk; rustls uses ring, which supports aarch64-linux-android. The distributor tools are
-  # Linux-only, so they are not built here.
+  # ----- Termux (Android, aarch64, bionic): exectzs + quicktzs -----
+  # exectzs (runtime) and quicktzs (builder CLI) both cross-compile to bionic. dlopen + .so work
+  # on bionic; rustls uses ring, which supports aarch64-linux-android. NOTE: a signing key must
+  # never live on an end-user device (invariant 7) -- quicktzs on Termux is for on-phone
+  # development only. The build server stays Linux-only and is not built here.
   termux:
     name: termux (aarch64-linux-android, exectzs)
     runs-on: ubuntu-latest
@@ -88,7 +89,7 @@ jobs:
             target
           key: termux-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: termux-release-
-      - name: Build exectzs (NDK clang)
+      - name: Build exectzs + quicktzs (NDK clang)
         # Cross-compile straight to aarch64-linux-android with the NDK's clang as linker/CC.
         # (cargo-ndk 4.x panics on these runners; the direct toolchain is simpler and stable.)
         # API 24 clang wrapper; RUSTFLAGS sets 16 KB max page size for Android 15+.
@@ -98,14 +99,14 @@ jobs:
           export CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$TC/llvm-ar"
           export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
-          cargo build --release --locked -p exectzs --target aarch64-linux-android
+          cargo build --release --locked -p exectzs -p quicktzs --target aarch64-linux-android
       - name: Package
         id: pkg
         run: |
           if [ "${GITHUB_REF_TYPE}" = tag ]; then ver="${GITHUB_REF_NAME}"; else ver="${GITHUB_SHA::7}"; fi
           name="quicktzs-${ver}-aarch64-linux-android"
           mkdir "$name"
-          cp target/aarch64-linux-android/release/exectzs README.md "$name/"
+          cp target/aarch64-linux-android/release/exectzs target/aarch64-linux-android/release/quicktzs README.md "$name/"
           [ -f LICENSE ] && cp LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
