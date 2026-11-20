@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "buildserver"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 # Executor hardening (spec/08). Cargo only honors profiles at the workspace root.
